@@ -1,6 +1,6 @@
 # Incident Root-Cause Investigator Pro
 
-A Slack-native AI agent that automates incident root‑cause investigation by joining data across **5 sources** through [Coral](https://coralproject.ai) SQL.
+A Slack-native AI agent that automates incident root‑cause investigation by joining data across **5 sources** through [Coral](https://withcoral.com) SQL.
 
 > **Hackathon:** Pirates of the Coral‑bean — Track 1 (Build an Enterprise Agent)
 
@@ -40,7 +40,7 @@ All data access goes through **Coral MCP stdio** — zero direct API calls to th
 ### Prerequisites
 
 - Python 3.11+
-- [Coral v0.2.1](https://coralproject.ai) installed and on your PATH
+- [Coral v0.2.1](https://withcoral.com) installed and on your PATH
 - A Slack workspace with Socket Mode enabled
 - An NVIDIA NIM API key (free tier) or OpenAI API key
 
@@ -154,12 +154,6 @@ investigator/
 3. In Slack: `@investigator what caused the 5xx spike?`
 4. The bot responds with progress updates and delivers a Block‑Kit report
 5. Check for saved report: `/postmortem --incident INC789`
-
----
-
-## Demo
-
-A 3-minute demo script is in [`demo/script.md`](demo/script.md). Screenshots go in `demo/screenshots/`.
 
 ---
 
