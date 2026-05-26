@@ -1,0 +1,23 @@
+name: mock_sentry
+version: "1.0.0"
+dsl_version: 3
+backend: jsonl
+description: Mock Sentry error groups for incident investigation demo
+tables:
+  - name: issues
+    description: Mock Sentry error groups for incident investigation demo
+    source:
+      location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/sentry
+      glob: "issues.jsonl"
+    columns:
+      - {name: id, type: Utf8, nullable: false}
+      - {name: short_id, type: Utf8, nullable: true}
+      - {name: title, type: Utf8, nullable: true}
+      - {name: status, type: Utf8, nullable: true}
+      - {name: level, type: Utf8, nullable: true}
+      - {name: count, type: Int64, nullable: true}
+      - {name: user_count, type: Int64, nullable: true}
+      - {name: first_seen, type: Utf8, nullable: true}
+      - {name: last_seen, type: Utf8, nullable: true}
+      - {name: project, type: Utf8, nullable: true}
+      - {name: query, type: Utf8, nullable: true}

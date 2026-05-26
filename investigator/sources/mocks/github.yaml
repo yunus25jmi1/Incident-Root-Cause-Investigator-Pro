@@ -1,0 +1,35 @@
+name: mock_github
+version: "1.0.0"
+dsl_version: 3
+backend: jsonl
+description: Mock GitHub pull requests for incident investigation demo
+tables:
+  - name: pulls
+    description: Mock GitHub pull requests for incident investigation demo
+    source:
+      location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/github
+      glob: "pulls.jsonl"
+    columns:
+      - {name: number, type: Int64, nullable: false}
+      - {name: title, type: Utf8, nullable: true}
+      - {name: state, type: Utf8, nullable: true}
+      - {name: merged, type: Boolean, nullable: true}
+      - {name: draft, type: Boolean, nullable: true}
+      - {name: body, type: Utf8, nullable: true}
+      - {name: user__login, type: Utf8, nullable: true}
+      - {name: user, type: Utf8, nullable: true}
+      - {name: base__ref, type: Utf8, nullable: true}
+      - {name: head__label, type: Utf8, nullable: true}
+      - {name: created_at, type: Utf8, nullable: true}
+      - {name: merged_at, type: Utf8, nullable: true}
+      - {name: closed_at, type: Utf8, nullable: true}
+      - {name: updated_at, type: Utf8, nullable: true}
+      - {name: html_url, type: Utf8, nullable: true}
+      - {name: additions, type: Int64, nullable: true}
+      - {name: deletions, type: Int64, nullable: true}
+      - {name: changed_files, type: Int64, nullable: true}
+      - {name: comments, type: Int64, nullable: true}
+      - {name: commits, type: Int64, nullable: true}
+      - {name: mergeable_state, type: Utf8, nullable: true}
+      - {name: owner, type: Utf8, nullable: true}
+      - {name: repo, type: Utf8, nullable: true}

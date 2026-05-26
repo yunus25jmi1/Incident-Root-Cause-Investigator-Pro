@@ -132,7 +132,7 @@ class TestAgentCoreIntegration:
         mock_coral = AsyncMock(spec=CoralClient)
 
         async def mock_query(sql: str):
-            if "sentry.issues" in sql:
+            if "mock_sentry.issues" in sql:
                 return QueryResult(
                     rows=[{
                         "id": "1", "title": "ZeroDivisionError spike",
@@ -154,7 +154,7 @@ class TestAgentCoreIntegration:
                     }],
                     row_count=1, columns=[],
                 )
-            if "github.pull_requests" in sql:
+            if "mock_github.pulls" in sql:
                 return QueryResult(
                     rows=[{
                         "title": "fix: checkout validation",
@@ -263,7 +263,7 @@ class TestEvidenceChain:
         mock_coral = AsyncMock(spec=CoralClient)
 
         async def mock_query(sql: str):
-            if "sentry.issues" in sql:
+            if "mock_sentry.issues" in sql:
                 return QueryResult(rows=[{
                     "id": "1", "title": "Error spike", "level": "error",
                     "count": 100, "first_seen": "2026-05-24T14:32:00Z",
@@ -274,7 +274,7 @@ class TestEvidenceChain:
                     "id": "dd-inc-001", "title": "Error rate spike",
                     "severity": "SEV-2", "customer_impacted": True,
                 }], row_count=1, columns=[])
-            if "github.pull_requests" in sql:
+            if "mock_github.pulls" in sql:
                 return QueryResult(rows=[{
                     "title": "fix: checkout validation",
                     "merged_at": "2026-05-24T14:30:00Z",
@@ -327,7 +327,7 @@ class TestEvidenceChain:
         mock_coral = AsyncMock(spec=CoralClient)
 
         async def mock_query(sql: str):
-            if "github.pull_requests" in sql:
+            if "mock_github.pulls" in sql:
                 return QueryResult(rows=[{
                     "title": "feat: new endpoint",
                     "merged_at": "2026-05-24T14:30:00Z",
@@ -336,7 +336,7 @@ class TestEvidenceChain:
                     "user__login": "Alice",
                     "base__ref": "main",
                 }], row_count=1, columns=[])
-            if "sentry.issues" in sql:
+            if "mock_sentry.issues" in sql:
                 return QueryResult(rows=[{
                     "id": "1", "title": "500 error spike",
                     "level": "error", "count": 500,
@@ -361,7 +361,7 @@ class TestEvidenceChain:
         mock_coral = AsyncMock(spec=CoralClient)
 
         async def mock_query(sql: str):
-            if "sentry.issues" in sql:
+            if "mock_sentry.issues" in sql:
                 return QueryResult(rows=[{
                     "id": "1", "title": "NPE in checkout",
                     "level": "fatal", "count": 1,
@@ -398,7 +398,7 @@ class TestEvidenceChain:
         mock_coral = AsyncMock(spec=CoralClient)
 
         async def mock_query(sql: str):
-            if "github.pull_requests" in sql:
+            if "mock_github.pulls" in sql:
                 return QueryResult(rows=[{
                     "title": "fix: checkout null check",
                     "merged_at": "2026-05-24T14:30:00Z",
@@ -407,7 +407,7 @@ class TestEvidenceChain:
                     "user__login": "Charlie",
                     "base__ref": "main",
                 }], row_count=1, columns=[])
-            if "sentry.issues" in sql:
+            if "mock_sentry.issues" in sql:
                 return QueryResult(rows=[{
                     "id": "1", "title": "NullReferenceException",
                     "level": "error", "count": 847,

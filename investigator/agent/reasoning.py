@@ -24,26 +24,34 @@ SYSTEM_PROMPT = (
     "or <!here> in your response.\n"
 )
 
-CATALOG_DESCRIPTION = (
-    "Available tables:\n"
-    "- sentry.issues: id, title, level, count, user_count, "
-    "first_seen, last_seen, project, status\n"
-    "- datadog.incidents: id, title, status, severity, created, "
-    "modified, resolved_at, customer_impacted\n"
-    "- github.pull_requests: title, merged_at, html_url, state, "
-    "user__login, base__ref, head__label\n"
-    "- pagerduty.incidents: id, title, status, urgency, created_at, "
-    "escalation_level, escalation_policy_id\n"
-    "- pagerduty.oncalls: id, escalation_policy_id, "
-    "escalation_level, name, email\n"
-    "- slack.messages (channel): user_id, text, ts\n"
-)
+def _source(table: str) -> str:
+    use_mock = os.environ.get("USE_MOCK_SOURCES", "true").strip().lower() == "true"
+    bundled = {"sentry.issues", "github.pulls", "slack.messages"}
+    if use_mock and table in bundled:
+        return f"mock_{table}"
+    return table
+
+def get_catalog_description() -> str:
+    return (
+        "Available tables:\n"
+        f"- {_source('sentry.issues')}: id, title, level, count, user_count, "
+        "first_seen, last_seen, project, status\n"
+        f"- {_source('datadog.incidents')}: id, title, status, severity, created, "
+        "modified, resolved_at, customer_impacted\n"
+        f"- {_source('github.pulls')}: number, title, state, merged, user__login, "
+        "merged_at, html_url, base__ref, head__label, owner, repo\n"
+        f"- {_source('pagerduty.incidents')}: id, title, status, urgency, created_at, "
+        "escalation_level, escalation_policy_id\n"
+        f"- {_source('pagerduty.oncalls')}: id, escalation_policy_id, "
+        "escalation_level, name, email\n"
+        f"- {_source('slack.messages')}: user_id, text, ts, channel, permalink\n"
+    )
 
 
 class ReasoningEngine:
     def __init__(
         self,
-        model: str = "nvidia/llama-3.1-nemotron-70b-instruct",
+        model: str = "meta/llama-3.3-70b-instruct",
         max_tokens: int = 2048,
         temperature: float = 0.1,
     ):
@@ -131,7 +139,7 @@ class ReasoningEngine:
         prompt = (
             f"## Question\n{question}\n\n"
             f"## Phase 1 Data\n{ctx}\n{p2_extra}\n\n"
-            f"## Available Tables\n{CATALOG_DESCRIPTION}\n\n"
+            f"## Available Tables\n{get_catalog_description()}\n\n"
             "Respond in JSON:\n"
             '{"root_cause": "...", "analysis": "...", '
             '"timeline": [{"time": "...", "event": "..."}], '

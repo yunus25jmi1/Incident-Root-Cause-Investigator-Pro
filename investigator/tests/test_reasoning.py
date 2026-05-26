@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 from investigator.agent.reasoning import (
     ReasoningEngine,
     SYSTEM_PROMPT,
-    CATALOG_DESCRIPTION,
+    get_catalog_description,
 )
 
 
@@ -19,7 +19,7 @@ class TestReasoningEngineInit:
     def test_reads_nvidia_key(self):
         with patch.dict(os.environ, {"NVIDIA_API_KEY": "nv-test-key"}, clear=True):
             engine = ReasoningEngine()
-            assert engine._model == "nvidia/llama-3.1-nemotron-70b-instruct"
+            assert engine._model == "meta/llama-3.3-70b-instruct"
 
     def test_reads_openai_key_fallback(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True):
@@ -326,7 +326,7 @@ class TestAnalyzeWithLoop:
                     "timeline": [],
                     "confidence": "Low",
                     "follow_up_sql": [
-                        "SELECT id, title FROM sentry.issues WHERE id = '1'"
+                        "SELECT id, title FROM mock_sentry.issues WHERE id = '1'"
                     ],
                     "suggested_actions": [],
                 }
@@ -630,9 +630,18 @@ class TestSystemPrompt:
 
 class TestCatalogDescription:
     def test_lists_all_tables(self):
-        for table in ("sentry.issues", "datadog.incidents", "github.pull_requests",
-                       "pagerduty.incidents", "pagerduty.oncalls", "slack.messages"):
-            assert table in CATALOG_DESCRIPTION
+        cd = get_catalog_description()
+        for table in ("mock_sentry.issues", "datadog.incidents", "mock_github.pulls",
+                       "pagerduty.incidents", "pagerduty.oncalls", "mock_slack.messages"):
+            assert table in cd
 
     def test_no_broken_tables(self):
-        assert "pull_request_files" not in CATALOG_DESCRIPTION
+        cd = get_catalog_description()
+        assert "pull_request_files" not in cd
+
+    def test_can_disable_mock(self):
+        import os
+        with patch.dict(os.environ, {"USE_MOCK_SOURCES": "false"}):
+            cd = get_catalog_description()
+            assert "sentry.issues" in cd
+            assert "mock_sentry.issues" not in cd

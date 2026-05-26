@@ -1,1 +1,1 @@
-{"id":"dd-inc-002","title":"Database connection pool exhaustion","status":"active","severity":"SEV-3","created":"2026-05-24T15:03:00Z","modified":"2026-05-24T15:15:00Z","resolved_at":null,"customer_impacted":true}
+{"id": "dd-inc-002", "title": "Database connection pool exhaustion", "status": "active", "severity": "SEV-3", "created": "2026-05-24T15:03:00Z", "modified": "2026-05-24T15:15:00Z", "resolved_at": null, "customer_impacted": true}

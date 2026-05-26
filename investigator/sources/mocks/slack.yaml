@@ -1,0 +1,20 @@
+name: mock_slack
+version: "1.0.0"
+dsl_version: 3
+backend: jsonl
+description: Mock Slack messages for incident investigation demo
+tables:
+  - name: messages
+    description: Mock Slack messages for incident investigation demo
+    source:
+      location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/slack
+      glob: "messages.jsonl"
+    columns:
+      - {name: user_id, type: Utf8, nullable: true}
+      - {name: text, type: Utf8, nullable: true}
+      - {name: ts, type: Utf8, nullable: true}
+      - {name: channel, type: Utf8, nullable: true}
+      - {name: permalink, type: Utf8, nullable: true}
+      - {name: reply_count, type: Int64, nullable: true}
+      - {name: thread_ts, type: Utf8, nullable: true}
+      - {name: subtype, type: Utf8, nullable: true}

@@ -16,6 +16,10 @@ else:
 from investigator.agent.coral_client import CoralClient, CoralError
 from investigator.agent.reasoning import ReasoningEngine
 
+_GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "").strip()
+_GITHUB_REPO = os.environ.get("GITHUB_REPO", "").strip()
+_USE_MOCK = os.environ.get("USE_MOCK_SOURCES", "true").strip().lower() == "true"
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,6 +38,14 @@ def _is_internal_error(msg: str) -> bool:
 
 
 class AgentCore:
+    @staticmethod
+    def _source(table: str) -> str:
+        prefix = "mock_" if _USE_MOCK else ""
+        bundled = {"sentry.issues", "github.pulls", "slack.messages"}
+        if _USE_MOCK and table in bundled:
+            return f"{prefix}{table}"
+        return table
+
     PHASE1_SINCE_DEFAULTS = {
         "sentry_issues": "2 hours",
         "datadog_incidents": "",
@@ -46,7 +58,7 @@ class AgentCore:
         "sentry_issues": """
             SELECT id, title, level, count, user_count,
                    first_seen, last_seen, project, status
-            FROM sentry.issues
+            FROM {sentry_issues}
             WHERE last_seen >= CURRENT_TIMESTAMP - INTERVAL '{{SINCE}}'
               AND level IN ('error', 'fatal')
               {{SERVICE_FILTER}}
@@ -56,29 +68,30 @@ class AgentCore:
         "datadog_incidents": """
             SELECT id, title, status, severity, created,
                    customer_impacted, resolved_at
-            FROM datadog.incidents
+            FROM {datadog_incidents}
             WHERE status = 'active'
             ORDER BY created DESC
         """,
         "github_pull_requests": """
             SELECT title, merged_at, html_url, state,
                    user__login, base__ref, head__label
-            FROM github.pull_requests
-            WHERE merged_at >= CURRENT_TIMESTAMP - INTERVAL '{{SINCE}}'
-              AND state = 'merged'
+            FROM {github_pulls}
+            WHERE state = 'merged'
+              AND merged_at >= CURRENT_TIMESTAMP - INTERVAL '{{SINCE}}'
             ORDER BY merged_at DESC
             LIMIT 10
         """,
         "pagerduty_incidents": """
             SELECT id, title, status, urgency, created_at, escalation_level
-            FROM pagerduty.incidents
+            FROM {pagerduty_incidents}
             WHERE status = 'triggered'
             ORDER BY urgency DESC
         """,
         "slack_messages": """
-            SELECT user_id, text, ts
-            FROM slack.messages(channel => '{{INCIDENTS_CHANNEL}}')
-            WHERE ts >= (CURRENT_TIMESTAMP - INTERVAL '{{SINCE}}')::TEXT
+            SELECT user_id, text, ts, channel, permalink
+            FROM {slack_messages}
+            WHERE channel = '{{INCIDENTS_CHANNEL}}'
+              AND ts >= CURRENT_TIMESTAMP - INTERVAL '{{SINCE}}'
             ORDER BY ts DESC
             LIMIT 30
         """,
@@ -172,10 +185,22 @@ class AgentCore:
         service_filter = (
             f"AND project = '{safe_service}'" if safe_service else ""
         )
+        source_table_map = {
+            "sentry_issues": self._source("sentry.issues"),
+            "datadog_incidents": self._source("datadog.incidents"),
+            "github_pull_requests": self._source("github.pulls"),
+            "pagerduty_incidents": self._source("pagerduty.incidents"),
+            "slack_messages": self._source("slack.messages"),
+        }
         for source_name, template in self.PHASE1_QUERY_TEMPLATES.items():
             since_val = parsed_since or self.PHASE1_SINCE_DEFAULTS.get(source_name, "")
             query = (
                 template
+                .replace("{sentry_issues}", source_table_map["sentry_issues"])
+                .replace("{datadog_incidents}", source_table_map["datadog_incidents"])
+                .replace("{github_pulls}", source_table_map["github_pull_requests"])
+                .replace("{pagerduty_incidents}", source_table_map["pagerduty_incidents"])
+                .replace("{slack_messages}", source_table_map["slack_messages"])
                 .replace("{{INCIDENTS_CHANNEL}}", self._incidents_channel)
                 .replace("{{SINCE}}", since_val)
                 .replace("{{SERVICE_FILTER}}", service_filter if source_name == "sentry_issues" else "")

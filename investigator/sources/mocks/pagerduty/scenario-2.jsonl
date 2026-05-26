@@ -1,1 +1,1 @@
-{"id":"INC790","title":"Database connection pool exhaustion","status":"triggered","urgency":"medium","created_at":"2026-05-24T15:04:00Z","escalation_level":1,"escalation_policy_id":"EP002"}
+{"id": "INC790", "title": "Database connection pool exhaustion", "status": "triggered", "urgency": "medium", "created_at": "2026-05-24T15:04:00Z", "escalation_level": 1, "escalation_policy_id": "EP002"}

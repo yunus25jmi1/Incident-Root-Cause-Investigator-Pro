@@ -227,7 +227,7 @@ class CoralClient:
         async with self._lock:
             try:
                 result = await asyncio.wait_for(
-                    self._session.call_tool("list_catalog"),
+                    self._session.call_tool("list_tables"),
                     timeout=self._timeout,
                 )
             except Exception as e:
@@ -246,7 +246,7 @@ class CoralClient:
         async with self._lock:
             try:
                 result = await asyncio.wait_for(
-                    self._session.call_tool("search_catalog", {"pattern": pattern}),
+                    self._session.call_tool("search_tables", {"pattern": pattern}),
                     timeout=self._timeout,
                 )
             except Exception as e:
@@ -262,10 +262,13 @@ class CoralClient:
             raise CoralError(
                 "Not connected to Coral MCP", QueryErrorCode.NOT_CONNECTED
             )
+        parts = table.split(".")
+        schema = parts[0] if len(parts) > 1 else "public"
+        table_name = parts[-1]
         async with self._lock:
             try:
                 result = await asyncio.wait_for(
-                    self._session.call_tool("describe_table", {"table": table}),
+                    self._session.call_tool("describe_table", {"schema": schema, "table": table_name}),
                     timeout=self._timeout,
                 )
             except Exception as e:
@@ -281,10 +284,13 @@ class CoralClient:
             raise CoralError(
                 "Not connected to Coral MCP", QueryErrorCode.NOT_CONNECTED
             )
+        parts = table.split(".")
+        schema = parts[0] if len(parts) > 1 else "public"
+        table_name = parts[-1]
         async with self._lock:
             try:
                 result = await asyncio.wait_for(
-                    self._session.call_tool("list_columns", {"table": table}),
+                    self._session.call_tool("list_columns", {"schema": schema, "table": table_name}),
                     timeout=self._timeout,
                 )
             except Exception as e:
@@ -294,25 +300,6 @@ class CoralClient:
                     {"table": table, "error": str(e)},
                 ) from e
         return self._parse_columns_result(result)
-
-    async def read_guide(self) -> str:
-        if not self.is_connected:
-            raise CoralError(
-                "Not connected to Coral MCP", QueryErrorCode.NOT_CONNECTED
-            )
-        async with self._lock:
-            try:
-                result = await asyncio.wait_for(
-                    self._session.read_resource("coral://guide"),
-                    timeout=self._timeout,
-                )
-            except Exception as e:
-                raise CoralError(
-                    f"Failed to read Coral guide: {e}",
-                    QueryErrorCode.UNKNOWN,
-                    {"error": str(e)},
-                ) from e
-        return self._parse_resource_text(result)
 
     async def __aenter__(self):
         await self.connect()
@@ -462,13 +449,4 @@ class CoralClient:
                 QueryErrorCode.MALFORMED_RESPONSE,
             ) from e
 
-    @staticmethod
-    def _parse_resource_text(result: Any) -> str:
-        try:
-            content = getattr(result, "content", None)
-            if not content:
-                return ""
-            return CoralClient._extract_text(content)
-        except Exception as e:
-            logger.warning("Failed to parse resource text: %s", e)
-            return ""
+

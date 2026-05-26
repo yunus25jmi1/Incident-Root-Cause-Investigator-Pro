@@ -417,7 +417,7 @@ class TestCoralClientCatalog:
         result = await client.search_catalog("sentry")
         assert len(result) == 1
         mock_session.call_tool.assert_called_once_with(
-            "search_catalog", {"pattern": "sentry"}
+            "search_tables", {"pattern": "sentry"}
         )
 
     @pytest.mark.asyncio
@@ -435,6 +435,9 @@ class TestCoralClientCatalog:
         )
         result = await client.describe_table("sentry.issues")
         assert result["name"] == "sentry.issues"
+        mock_session.call_tool.assert_called_once_with(
+            "describe_table", {"schema": "sentry", "table": "issues"}
+        )
 
     @pytest.mark.asyncio
     async def test_list_columns(self, connected_client):
@@ -451,17 +454,9 @@ class TestCoralClientCatalog:
         assert isinstance(result[0], ColumnInfo)
         assert result[0].name == "id"
         assert result[0].nullable is False
-
-    @pytest.mark.asyncio
-    async def test_read_guide(self, connected_client):
-        client, mock_session = connected_client
-        mock_session.read_resource = AsyncMock(
-            return_value=MockCallToolResult(
-                content=[MockTextContent(text="# Coral Guide\n\nHow to query data sources.")]
-            )
+        mock_session.call_tool.assert_called_once_with(
+            "list_columns", {"schema": "sentry", "table": "issues"}
         )
-        result = await client.read_guide()
-        assert "Coral Guide" in result
 
     @pytest.mark.asyncio
     async def test_list_catalog_not_connected(self):

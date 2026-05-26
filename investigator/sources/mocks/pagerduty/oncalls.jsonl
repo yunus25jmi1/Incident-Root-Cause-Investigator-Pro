@@ -1,1 +1,6 @@
 {"id": "oncall-001", "escalation_policy_id": "EP001", "escalation_level": 1, "name": "Bob Smith", "email": "bob@company.com"}
+{"id": "oncall-002", "escalation_policy_id": "EP001", "escalation_level": 2, "name": "Alice", "email": "alice@company.com"}
+{"id": "oncall-003", "escalation_policy_id": "EP002", "escalation_level": 1, "name": "Diana Chen", "email": "diana@company.com"}
+{"id": "oncall-004", "escalation_policy_id": "EP002", "escalation_level": 2, "name": "Charlie", "email": "charlie@company.com"}
+{"id": "oncall-005", "escalation_policy_id": "EP003", "escalation_level": 1, "name": "Frank Miller", "email": "frank@company.com"}
+{"id": "oncall-006", "escalation_policy_id": "EP003", "escalation_level": 2, "name": "Bob Smith", "email": "bob@company.com"}
