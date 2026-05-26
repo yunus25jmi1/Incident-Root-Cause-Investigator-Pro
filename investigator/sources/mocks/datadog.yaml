@@ -1,0 +1,36 @@
+name: datadog
+version: "1.0.0"
+dsl_version: 3
+backend: jsonl
+description: Mock Datadog data for incident investigation demo
+tables:
+  - name: incidents
+    description: Mock Datadog incidents
+    source:
+      location: sources/mocks/datadog/
+      glob: "incidents.jsonl"
+    columns:
+      - name: id
+        type: Utf8
+        nullable: false
+      - name: title
+        type: Utf8
+        nullable: true
+      - name: status
+        type: Utf8
+        nullable: true
+      - name: severity
+        type: Utf8
+        nullable: true
+      - name: created
+        type: Utf8
+        nullable: true
+      - name: modified
+        type: Utf8
+        nullable: true
+      - name: resolved_at
+        type: Utf8
+        nullable: true
+      - name: customer_impacted
+        type: Boolean
+        nullable: true

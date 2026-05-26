@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# Runtime data
+investigator/data/reports/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.commandcode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+.pytest_cache/
+.coverage
+htmlcov/

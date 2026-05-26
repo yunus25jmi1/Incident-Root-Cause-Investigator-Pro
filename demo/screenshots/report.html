@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Slack Block Kit - Incident Root-Cause Investigator Pro</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  background: #1a1d21;
+  color: #1d1c1d;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 0 40px 0;
+  min-height: 100vh;
+}
+.top-bar {
+  width: 100%;
+  background: #350d36;
+  color: #fff;
+  padding: 12px 0;
+  text-align: center;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+.container {
+  width: 800px;
+  max-width: 100%;
+  margin: 24px auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.message-card {
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.15), 0 1px 2px rgba(0,0,0,0.1);
+  overflow: hidden;
+}
+.message-card-header {
+  background: #f8f8f8;
+  padding: 12px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1d1c1d;
+  border-bottom: 1px solid #e8e8e8;
+}
+.block-list {
+  padding: 12px 20px;
+}
+.block {
+  padding: 6px 0;
+}
+.block + .block { border-top: 1px solid #f0f0f0; }
+.block-header {
+  font-size: 18px;
+  font-weight: 900;
+  line-height: 1.4;
+  padding: 8px 0;
+  color: #1d1c1d;
+}
+.block-divider { padding: 4px 0; }
+.block-divider hr {
+  border: none;
+  border-top: 1px solid #ddd;
+  margin: 0;
+}
+.block-section {
+  font-size: 15px;
+  line-height: 1.55;
+  color: #1d1c1d;
+  word-wrap: break-word;
+}
+.block-section strong { font-weight: 700; }
+.block-section code {
+  background: #f0f0f0;
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+  font-size: 13px;
+  color: #e01e5a;
+}
+.block-section pre {
+  background: #f6f6f6;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  padding: 12px;
+  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-x: auto;
+  margin: 4px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.block-section a { color: #1264a3; text-decoration: none; }
+.block-section a:hover { text-decoration: underline; }
+.block-context {
+  font-size: 13px;
+  line-height: 1.4;
+  color: #616061;
+}
+.block-context a { color: #1264a3; text-decoration: none; }
+.block-context a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<div class="top-bar">Incident Root-Cause Investigator Pro</div>
+<div class="container" id="app"></div>
+
+<script>
+const INVESTIGATION_BLOCKS = [{"type":"header","text":{"type":"plain_text","text":"🚨 Incident Analysis Report"}},{"type":"divider"},{"type":"section","text":{"type":"mrkdwn","text":"*📋 Summary*\nPR #4321 (Alice) merged at 14:30 → NullReferenceException spike at 14:32 (847 errors, 312 users) → SEV-2 incident at 14:33 → PagerDuty page at 14:35"}},{"type":"section","text":{"type":"mrkdwn","text":"*📊 Evidence Chain*\n1. <https://github.com/org/repo/pull/4321|PR #4321 merged: fix/checkout-validation> — by Alice (14:30)\n2. NullReferenceException in CheckoutController.check() — 847 occurrences, 312 users (14:32)\n3. High error rate on checkout-service — SEV-2 - Customer impacted: True (14:33)\n4. Checkout service errors spike - SEV-2 — Urgency: high (14:35)\n5. Slack message from U001 — Anyone looking at this? (1621877700.000100)\n"}},{"type":"section","text":{"type":"mrkdwn","text":"*👤 Who's Involved*\n• Alice (PR author)\n• Bob Smith (On-call SRE)\n"}},{"type":"section","text":{"type":"mrkdwn","text":"*🎯 Suggested Actions*\n• [P0] Review and revert PR #4321\n• [P1] Add null check in CheckoutController.check()\n• [P2] Schedule post-incident review\n"}},{"type":"context","elements":[{"type":"mrkdwn","text":"*🔌 Sources*\n✅ sentry: 1 results\n✅ github: 1 results\n✅ datadog: 1 results\n✅ pagerduty: 1 results\n✅ slack: 2 results\n"}]},{"type":"divider"},{"type":"context","elements":[{"type":"mrkdwn","text":"🤖 *Investigator Pro* | Confidence: High | 2026-05-26T12:00:00Z"}]}];
+
+const POSTMORTEM_BLOCKS = [{"type":"header","text":{"type":"plain_text","text":"📝 Post-Incident Review"}},{"type":"divider"},{"type":"section","text":{"type":"mrkdwn","text":"*Incident:* INC789\n*Date:* 2026-05-26\n*Question:* what caused the 5xx spike?"}},{"type":"divider"},{"type":"section","text":{"type":"mrkdwn","text":"*🔍 Root Cause*\nPR #4321 (Alice) merged at 14:30 → NullReferenceException spike at 14:32 (847 errors, 312 users) → SEV-2 incident at 14:33 → PagerDuty page at 14:35"}},{"type":"section","text":{"type":"mrkdwn","text":"*⏱ Timeline*\n• `14:30` — PR #4321 merged: fix/checkout-validation (by Alice)\n• `14:32` — NullReferenceException in CheckoutController.check() (847 occurrences, 312 users)\n• `14:33` — High error rate on checkout-service (SEV-2 - Customer impacted: True)\n• `14:35` — Checkout service errors spike - SEV-2 (Urgency: high)\n• `1621877700.000100` — Slack message from U001 (Anyone looking at this?)\n"}},{"type":"section","text":{"type":"mrkdwn","text":"*👥 Participants*\n• Alice — PR author\n• Bob Smith — On-call SRE\n"}},{"type":"section","text":{"type":"mrkdwn","text":"*🛠 Action Items*\n- [ ] (P0) Review and revert PR #4321\n- [ ] (P1) Add null check in CheckoutController.check()\n- [ ] (P2) Schedule post-incident review\n"}},{"type":"divider"},{"type":"context","elements":[{"type":"mrkdwn","text":"📄 Generated by *Investigator Pro* | 2026-05-26T12:00:00Z"}]}];
+
+const HELP_BLOCKS = [{"type":"header","text":{"type":"plain_text","text":"🤖 Investigator Pro Help"}},{"type":"divider"},{"type":"section","text":{"type":"mrkdwn","text":"Investigate incidents right from Slack.\n\n*Commands:*\n• `@investigator <question>` — Investigate an incident\n• `/postmortem --incident INC123` — Generate post-incident review\n\n*Example questions:*\n• `@investigator what caused the 5xx spike?`\n• `@investigator why is checkout slow?`\n• `@investigator what's causing 502s?`\n• `@investigator who's on call?`\n\n*Supported sources:* GitHub, Sentry, Datadog, PagerDuty, Slack"}}];
+
+const ERROR_BLOCKS = [{"type":"section","text":{"type":"mrkdwn","text":"❌ *Coral Query Failed*"}},{"type":"section","text":{"type":"mrkdwn","text":"```Connection to MCP stdio timed out after 30s```"}},{"type":"context","elements":[{"type":"mrkdwn","text":"Try again or check the logs for more details."}]}];
+
+function escapeHtml(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+
+function parseMrkdwn(text) {
+  let html = text;
+
+  html = html.replace(/<!channel>/g, '@channel');
+  html = html.replace(/<!everyone>/g, '@everyone');
+  html = html.replace(/<!here>/g, '@here');
+
+  html = html.replace(/```([\s\S]*?)```/g, (_, code) => '<pre>' + escapeHtml(code) + '</pre>');
+
+  html = html.replace(/`([^`]+)`/g, '<code>' + escapeHtml('$1') + '</code>');
+
+  html = html.replace(/\*([^*]+)\*/g, '<strong>$1</strong>');
+
+  html = html.replace(/<([^|>]+)\|([^>]+)>/g, '<a href="$1" target="_blank">$2</a>');
+
+  html = html.replace(/\n/g, '<br>');
+
+  return html;
+}
+
+// Fix: backtick code replacement with proper escaping
+function parseMrkdwnFixed(text) {
+  let html = text;
+
+  html = html.replace(/<!channel>/g, '@channel');
+  html = html.replace(/<!everyone>/g, '@everyone');
+  html = html.replace(/<!here>/g, '@here');
+
+  html = html.replace(/```([\s\S]*?)```/g, (_, code) => '<pre>' + escapeHtml(code) + '</pre>');
+
+  html = html.replace(/`([^`]+)`/g, (_, code) => '<code>' + escapeHtml(code) + '</code>');
+
+  html = html.replace(/\*([^*]+)\*/g, '<strong>$1</strong>');
+
+  html = html.replace(/<([^|>]+)\|([^>]+)>/g, '<a href="$1" target="_blank">$2</a>');
+
+  html = html.replace(/\n/g, '<br>');
+
+  return html;
+}
+
+function renderBlocks(blocks) {
+  let html = '';
+  for (const block of blocks) {
+    switch (block.type) {
+      case 'header': {
+        const t = block.text && block.text.text || '';
+        html += '<div class="block block-header">' + escapeHtml(t) + '</div>';
+        break;
+      }
+      case 'divider':
+        html += '<div class="block block-divider"><hr></div>';
+        break;
+      case 'section': {
+        if (block.text && block.text.type === 'mrkdwn') {
+          html += '<div class="block block-section">' + parseMrkdwnFixed(block.text.text) + '</div>';
+        }
+        break;
+      }
+      case 'context': {
+        if (block.elements) {
+          let content = '';
+          for (const el of block.elements) {
+            if (el.type === 'mrkdwn') content += parseMrkdwnFixed(el.text);
+            else content += escapeHtml(el.text || '');
+          }
+          html += '<div class="block block-context">' + content + '</div>';
+        }
+        break;
+      }
+    }
+  }
+  return html;
+}
+
+function buildCards() {
+  const cards = [
+    { label: '🚨 Investigation Report', blocks: INVESTIGATION_BLOCKS },
+    { label: '📝 Post-Incident Review', blocks: POSTMORTEM_BLOCKS },
+    { label: '🤖 Help Message', blocks: HELP_BLOCKS },
+    { label: 'Error Message', blocks: ERROR_BLOCKS }
+  ];
+
+  const container = document.getElementById('app');
+  let html = '';
+  for (const card of cards) {
+    html += '<div class="message-card">';
+    html += '<div class="message-card-header">' + card.label + '</div>';
+    html += '<div class="block-list">';
+    html += renderBlocks(card.blocks);
+    html += '</div></div>';
+  }
+  container.innerHTML = html;
+}
+
+buildCards();
+</script>
+</body>
+</html>

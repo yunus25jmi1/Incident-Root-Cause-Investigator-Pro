@@ -1,0 +1,192 @@
+import os
+import asyncio
+import re
+import json
+import logging
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(dotenv_path=_env_path)
+else:
+    load_dotenv()
+
+from slack_bolt.async_app import AsyncApp
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+
+from investigator.bot.queue import InvestigationQueue
+from investigator.bot.formatter import (
+    postmortem_report,
+    error_message,
+    help_message,
+    not_authorized_message,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
+if not SLACK_BOT_TOKEN or not SLACK_APP_TOKEN:
+    raise ValueError(
+        "SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env"
+    )
+
+ALLOWED_CHANNELS_RAW = os.environ.get("ALLOWED_CHANNELS", "")
+ALLOWED_CHANNELS = [
+    c.strip() for c in ALLOWED_CHANNELS_RAW.split(",") if c.strip()
+]
+INCIDENTS_CHANNEL = os.environ.get("INCIDENTS_CHANNEL", "incidents")
+MAX_QUEUE_SIZE = int(os.environ.get("MAX_QUEUE_SIZE", "10"))
+# CORAL_COMMAND should be an absolute path in .env to prevent PATH hijacking
+REPORTS_DIR = Path(__file__).resolve().parent.parent / "data" / "reports"
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+app = AsyncApp(token=SLACK_BOT_TOKEN)
+investigation_queue: "InvestigationQueue | None" = None
+
+
+def is_channel_allowed(channel_id: str) -> bool:
+    if not ALLOWED_CHANNELS:
+        return True
+    return channel_id in ALLOWED_CHANNELS
+
+
+def _sanitize_id(raw: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "", raw)[:128]
+
+
+def parse_flags(text: str) -> tuple[str, str, str]:
+    since = ""
+    service = ""
+    since_match = re.search(r"--since\s+(\S+)", text)
+    if since_match:
+        since = since_match.group(1)
+        text = text.replace(since_match.group(0), "")
+    service_match = re.search(r"--service\s+(\S+)", text)
+    if service_match:
+        service = service_match.group(1)
+        text = text.replace(service_match.group(0), "")
+    return text.strip(), since, service
+
+
+def extract_question(event: dict) -> str:
+    text = event.get("text", "")
+    text = re.sub(r"<@[A-Z0-9]+>", "", text).strip()
+    return text
+
+
+def parse_postmortem_args(text: str) -> dict:
+    incident_match = re.search(r"--incident\s+(\S+)", text)
+    raw = incident_match.group(1) if incident_match else None
+    return {
+        "incident_id": _sanitize_id(raw) if raw else None,
+    }
+
+
+@app.event("app_mention")
+async def handle_mention(event: dict, say, client):
+    channel = event.get("channel", "")
+    thread_ts = event.get("thread_ts", event.get("ts", ""))
+
+    if not is_channel_allowed(channel):
+        await say(
+            text="Channel not authorized",
+            blocks=not_authorized_message(),
+            thread_ts=thread_ts,
+        )
+        return
+
+    raw_question = extract_question(event)
+    question, since_flag, service_flag = parse_flags(raw_question)
+    if not question:
+        await say(
+            text="Please ask a question about an incident.",
+            blocks=help_message(),
+            thread_ts=thread_ts,
+        )
+        return
+
+    logger.info(
+        "Mention received: channel=%s, question=%s, since=%s, service=%s",
+        channel, question[:100], since_flag or "default", service_flag or "none",
+    )
+    await investigation_queue.enqueue(
+        question, channel, thread_ts, since=since_flag, service=service_flag,
+    )
+
+
+@app.command("/postmortem")
+async def handle_postmortem(command: dict, say, client):
+    channel = command.get("channel_id", "")
+    text = command.get("text", "")
+    args = parse_postmortem_args(text)
+    incident_id = args.get("incident_id")
+
+    if not incident_id:
+        await say(
+            text="Usage: `/postmortem --incident INC123`",
+            blocks=[
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": "Please specify an incident ID.\n"
+                        "Usage: `/postmortem --incident INC123`",
+                    },
+                }
+            ],
+        )
+        return
+
+    report_file = REPORTS_DIR / f"{incident_id}.json"
+    if not report_file.exists():
+        await say(
+            text=f"📝 No saved investigation found for {incident_id}. "
+            f"Run `@investigator` first to investigate this incident.",
+            thread_ts=command.get("ts", ""),
+        )
+        return
+
+    try:
+        with open(report_file) as f:
+            report = json.load(f)
+        blocks = postmortem_report(report)
+        await say(
+            text=f"📝 Post-Incident Review: {incident_id}",
+            blocks=blocks,
+        )
+        logger.info("Postmortem generated for %s", incident_id)
+    except Exception as e:
+        logger.exception("Failed to generate postmortem")
+        await say(
+            text=f"Failed to generate postmortem: {e}",
+            blocks=error_message("Postmortem Generation Failed", str(e)),
+        )
+
+
+@app.error
+async def global_error_handler(error, body, logger):
+    logger.exception("Global error: %s", error)
+
+
+async def main():
+    global investigation_queue
+    investigation_queue = InvestigationQueue(
+        app.client,
+        incidents_channel=INCIDENTS_CHANNEL,
+        max_queue_size=MAX_QUEUE_SIZE,
+    )
+
+    logger.info("Starting Investigator Pro bot (Socket Mode)...")
+    handler = AsyncSocketModeHandler(app, SLACK_APP_TOKEN)
+    await handler.start_async()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

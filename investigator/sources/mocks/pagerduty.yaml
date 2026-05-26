@@ -1,0 +1,54 @@
+name: pagerduty
+version: "1.0.0"
+dsl_version: 3
+backend: jsonl
+description: Mock PagerDuty data for incident investigation demo
+tables:
+  - name: incidents
+    description: Mock PagerDuty incidents
+    source:
+      location: sources/mocks/pagerduty/
+      glob: "incidents.jsonl"
+    columns:
+      - name: id
+        type: Utf8
+        nullable: false
+      - name: title
+        type: Utf8
+        nullable: true
+      - name: status
+        type: Utf8
+        nullable: true
+      - name: urgency
+        type: Utf8
+        nullable: true
+      - name: created_at
+        type: Utf8
+        nullable: true
+      - name: escalation_level
+        type: Int64
+        nullable: true
+      - name: escalation_policy_id
+        type: Utf8
+        nullable: true
+  - name: oncalls
+    description: Mock PagerDuty oncalls
+    source:
+      location: sources/mocks/pagerduty/
+      glob: "oncalls.jsonl"
+    columns:
+      - name: id
+        type: Utf8
+        nullable: false
+      - name: escalation_policy_id
+        type: Utf8
+        nullable: true
+      - name: escalation_level
+        type: Int64
+        nullable: true
+      - name: name
+        type: Utf8
+        nullable: true
+      - name: email
+        type: Utf8
+        nullable: true

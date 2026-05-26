@@ -1,0 +1,1 @@
+{"id": "INC791", "title": "Deployment config drift - HTTP 502 errors", "status": "triggered", "urgency": "high", "created_at": "2026-05-24T16:04:00Z", "escalation_level": 1, "escalation_policy_id": "EP003"}
