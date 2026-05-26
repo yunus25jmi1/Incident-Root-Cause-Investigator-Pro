@@ -12,7 +12,7 @@ A Slack-native AI agent that automates incident root‑cause investigation by jo
 - **`/postmortem --incident INC789`** — generate a post-incident review from a saved investigation
 - **`--since 3h` / `--service checkout`** — narrow time windows and services
 - **Agent loop** — the LLM can request follow-up SQL queries when it needs more data
-- **3 mock scenarios** included for demo and testing
+- **Comprehensive mock data** — 30-44 realistic records per source covering 3+ incident storylines
 
 ## Architecture
 
@@ -57,11 +57,8 @@ make setup
 # At minimum: SLACK_BOT_TOKEN, SLACK_APP_TOKEN, NVIDIA_API_KEY
 nano .env
 
-# Seed mock data (Datadog + PagerDuty JSONL)
-make seed-mock
-
-# (Optional) Push errors to Sentry for real demo
-make seed-sentry
+# Generate comprehensive mock data for all 5 sources
+python -m investigator.scripts.seed_all --activate
 
 # Start the bot
 make run
@@ -76,23 +73,28 @@ make run
 | `NVIDIA_API_KEY` | One of | NVIDIA NIM API key |
 | `OPENAI_API_KEY` | One of | OpenAI API key (fallback) |
 | `OPENAI_BASE_URL` | No | Custom LLM endpoint |
-| `INCEDENTS_CHANNEL` | No | Channel name for {{INCIDENTS_CHANNEL}} substitution |
+| `INCIDENTS_CHANNEL` | No | Slack channel ID for message queries (default: `incidents`) |
 | `ALLOWED_CHANNELS` | No | Comma-separated list of allowed channel IDs |
+| `GITHUB_OWNER` | No | GitHub owner/org for live PR queries |
+| `GITHUB_REPO` | No | GitHub repo name for live PR queries |
+| `USE_MOCK_SOURCES` | No | Set to `true` to query mock sources instead of live APIs (default: `true`) |
 | `SENTRY_DSN` | Optional | Sentry DSN for seed-sentry |
 | `CORAL_COMMAND` | No | Coral binary path (default: `coral`) |
 
-### Mock Scenarios
+### Mock Data
 
-Three pre-built incident scenarios are included:
+Mock imported sources (`mock_sentry`, `mock_github`, `mock_slack`) provide 30-44 realistic records each, covering 3 incident storylines:
 
-1. **PR merge broke checkout** — PR #4321 merged → NPE spike → SEV-2 → PagerDuty page
-2. **Database slowdown** — Migration deploy → PostgreSQL pool exhaustion → SEV-1
-3. **Deployment config drift** — Config change → auth errors → 403 spike → SEV-2
+| Incident | PR | Sentry Error | Datadog | PagerDuty |
+|---|---|---|---|---|
+| PR merge broke checkout | #4321 Alice | ZeroDivisionError (847) | SEV-2 | INC789 |
+| Database pool exhaustion | #4323 Charlie → reverted | ConnectionTimeoutError (1560) | SEV-3 | INC790 |
+| Config drift — HTTP 502 | #4325 Alice | Http502Error (2100) | SEV-2 | INC791 |
 
-Switch between them:
+Regenerate anytime:
 
 ```bash
-make activate-scenario SCENARIO=2
+python -m investigator.scripts.seed_all --activate
 ```
 
 ## Testing
@@ -122,13 +124,12 @@ investigator/
 │   ├── queue.py            # InvestigationQueue — serial async worker
 │   └── formatter.py        # Block‑Kit builders for Slack messages
 ├── scripts/
-│   ├── generate_mock.py    # JSONL mock data generator + scenario activator
+│   ├── generate_mock.py    # Legacy JSONL mock generator (3 scenarios)
+│   ├── seed_all.py         # Comprehensive mock data for all 5 sources
 │   └── seed_sentry.py      # Push test errors to Sentry
 ├── sources/mocks/
-│   ├── datadog.yaml        # Coral source spec (jsonl backend)
-│   ├── pagerduty.yaml      # Coral source spec (jsonl backend)
-│   ├── datadog/            # Generated JSONL data files
-│   └── pagerduty/          # Generated JSONL data files
+│   ├── {datadog,pagerduty,sentry,github,slack}.yaml  # Coral source specs
+│   ├── {datadog,pagerduty,sentry,github,slack}/       # Generated JSONL data
 └── tests/
     ├── test_coral_client.py   # 89 tests — MCP client, ReadOnlyValidator, edge cases
     ├── test_reasoning.py      # 30+ tests — intent, Phase 2 loop, error paths
