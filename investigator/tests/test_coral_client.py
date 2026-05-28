@@ -718,3 +718,54 @@ def test_readonly_validator_parametrized(sql, should_pass):
         with pytest.raises(CoralError) as exc:
             ReadOnlyValidator.validate(sql)
         assert exc.value.code == QueryErrorCode.INVALID_SQL
+
+
+class TestCatalogCache:
+    @pytest.mark.asyncio
+    async def test_cache_hits(self):
+        from investigator.agent.coral_client import CatalogCache
+
+        cache = CatalogCache(ttl_seconds=60)
+        await cache.set("test_key", [1, 2, 3])
+        result = await cache.get("test_key")
+        assert result == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_cache_miss(self):
+        from investigator.agent.coral_client import CatalogCache
+
+        cache = CatalogCache(ttl_seconds=60)
+        result = await cache.get("nonexistent")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_cache_expiry(self):
+        from investigator.agent.coral_client import CatalogCache
+
+        cache = CatalogCache(ttl_seconds=0.05)
+        await cache.set("test_key", "value")
+        await asyncio.sleep(0.1)
+        result = await cache.get("test_key")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_cache_invalidate_key(self):
+        from investigator.agent.coral_client import CatalogCache
+
+        cache = CatalogCache(ttl_seconds=60)
+        await cache.set("key1", "val1")
+        await cache.set("key2", "val2")
+        await cache.invalidate("key1")
+        assert await cache.get("key1") is None
+        assert await cache.get("key2") == "val2"
+
+    @pytest.mark.asyncio
+    async def test_cache_invalidate_all(self):
+        from investigator.agent.coral_client import CatalogCache
+
+        cache = CatalogCache(ttl_seconds=60)
+        await cache.set("key1", "val1")
+        await cache.set("key2", "val2")
+        await cache.invalidate()
+        assert await cache.get("key1") is None
+        assert await cache.get("key2") is None

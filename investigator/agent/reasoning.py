@@ -117,8 +117,16 @@ class ReasoningEngine:
             if "error" in data:
                 parts.append(f"[{source_name}] ERROR: {data['error']}")
             elif data.get("rows"):
-                parts.append(f"[{source_name}] {data['row_count']} rows:")
-                parts.append(json.dumps(data["rows"], indent=2))
+                rows = data["rows"]
+                if len(rows) > 100:
+                    parts.append(
+                        f"[{source_name}] {data['row_count']} rows "
+                        f"(showing first 100 of {len(rows)}):"
+                    )
+                    parts.append(json.dumps(rows[:100], indent=2))
+                else:
+                    parts.append(f"[{source_name}] {data['row_count']} rows:")
+                    parts.append(json.dumps(rows, indent=2))
             else:
                 parts.append(f"[{source_name}] No data")
         return "\n".join(parts)

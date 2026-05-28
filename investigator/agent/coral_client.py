@@ -4,7 +4,8 @@ import re
 import asyncio
 import logging
 import random
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional, TypeVar
 from contextlib import AsyncExitStack
@@ -78,6 +79,45 @@ TRANSIENT_CODES = {
 
 def is_transient_error(error: CoralError) -> bool:
     return error.code in TRANSIENT_CODES
+
+
+@dataclass
+class CacheEntry:
+    result: Any
+    expiry: float
+
+    def is_expired(self) -> bool:
+        return time.monotonic() >= self.expiry
+
+
+class CatalogCache:
+    def __init__(self, ttl_seconds: float = 60.0):
+        self._ttl = ttl_seconds
+        self._cache: dict[str, CacheEntry] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: str) -> Optional[Any]:
+        async with self._lock:
+            entry = self._cache.get(key)
+            if entry and not entry.is_expired():
+                return entry.result
+            if entry:
+                del self._cache[key]
+            return None
+
+    async def set(self, key: str, result: Any) -> None:
+        async with self._lock:
+            self._cache[key] = CacheEntry(
+                result=result,
+                expiry=time.monotonic() + self._ttl,
+            )
+
+    async def invalidate(self, key: Optional[str] = None) -> None:
+        async with self._lock:
+            if key:
+                self._cache.pop(key, None)
+            else:
+                self._cache.clear()
 
 
 class ReadOnlyValidator:
@@ -168,6 +208,7 @@ class CoralClient:
         self._read = None
         self._write = None
         self._lock = asyncio.Lock()
+        self._catalog_cache = CatalogCache(ttl_seconds=60.0)
 
     @property
     def is_connected(self) -> bool:
@@ -270,6 +311,9 @@ class CoralClient:
             raise CoralError(
                 "Not connected to Coral MCP", QueryErrorCode.NOT_CONNECTED
             )
+        cached = await self._catalog_cache.get("list_catalog")
+        if cached is not None:
+            return cached
         async with self._lock:
             try:
                 result = await asyncio.wait_for(
@@ -282,13 +326,19 @@ class CoralClient:
                     QueryErrorCode.UNKNOWN,
                     {"error": str(e)},
                 ) from e
-        return self._parse_catalog_result(result)
+        parsed = self._parse_catalog_result(result)
+        await self._catalog_cache.set("list_catalog", parsed)
+        return parsed
 
     async def search_catalog(self, pattern: str) -> list[CatalogEntry]:
         if not self.is_connected:
             raise CoralError(
                 "Not connected to Coral MCP", QueryErrorCode.NOT_CONNECTED
             )
+        cache_key = f"search:{pattern}"
+        cached = await self._catalog_cache.get(cache_key)
+        if cached is not None:
+            return cached
         async with self._lock:
             try:
                 result = await asyncio.wait_for(
@@ -301,13 +351,19 @@ class CoralClient:
                     QueryErrorCode.UNKNOWN,
                     {"pattern": pattern, "error": str(e)},
                 ) from e
-        return self._parse_catalog_result(result)
+        parsed = self._parse_catalog_result(result)
+        await self._catalog_cache.set(cache_key, parsed)
+        return parsed
 
     async def describe_table(self, table: str) -> dict[str, Any]:
         if not self.is_connected:
             raise CoralError(
                 "Not connected to Coral MCP", QueryErrorCode.NOT_CONNECTED
             )
+        cache_key = f"describe:{table}"
+        cached = await self._catalog_cache.get(cache_key)
+        if cached is not None:
+            return cached
         parts = table.split(".")
         schema = parts[0] if len(parts) > 1 else "public"
         table_name = parts[-1]
@@ -323,7 +379,9 @@ class CoralClient:
                     QueryErrorCode.TABLE_NOT_FOUND,
                     {"table": table, "error": str(e)},
                 ) from e
-        return self._parse_describe_result(result)
+        parsed = self._parse_describe_result(result)
+        await self._catalog_cache.set(cache_key, parsed)
+        return parsed
 
     async def list_columns(self, table: str) -> list[ColumnInfo]:
         if not self.is_connected:

@@ -214,7 +214,10 @@ class AgentCore:
 
     @staticmethod
     def _sanitize_service(service: str) -> str:
-        return re.sub(r"[^a-zA-Z0-9_.-]", "", service)
+        cleaned = re.sub(r"[^a-zA-Z0-9_.-]", "", service)
+        if cleaned != service:
+            logger.warning("Service name contained unsafe characters: %r", service)
+        return cleaned
 
     @staticmethod
     def _parse_since(raw: str) -> str:
@@ -411,7 +414,7 @@ class AgentCore:
     @staticmethod
     def _build_evidence_chain(
         sentry_rows, datadog_rows, github_rows, pagerduty_rows, slack_rows,
-        max_per_source: int = 100,
+        max_per_source: int = 20,
     ) -> list[dict[str, str]]:
         chain = []
         for pr in github_rows[:max_per_source]:

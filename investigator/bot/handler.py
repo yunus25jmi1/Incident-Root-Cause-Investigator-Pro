@@ -18,6 +18,8 @@ from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 from investigator.bot.queue import InvestigationQueue, QueuePersistence
+from investigator.lib.rate_limiter import RateLimiter
+from investigator.lib.sanitizer import ErrorSanitizer
 from investigator.bot.formatter import (
     postmortem_report,
     error_message,
@@ -45,11 +47,16 @@ ALLOWED_CHANNELS = [
 INCIDENTS_CHANNEL = os.environ.get("INCIDENTS_CHANNEL", "incidents")
 MAX_QUEUE_SIZE = int(os.environ.get("MAX_QUEUE_SIZE", "10"))
 # CORAL_COMMAND should be an absolute path in .env to prevent PATH hijacking
+RATE_LIMIT_PER_WINDOW = int(os.environ.get("RATE_LIMIT_PER_WINDOW", "10"))
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+MAX_QUESTION_LENGTH = 5000
+
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "data" / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = AsyncApp(token=SLACK_BOT_TOKEN)
 investigation_queue: "InvestigationQueue | None" = None
+rate_limiter = RateLimiter(max_requests=RATE_LIMIT_PER_WINDOW, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
 
 
 def is_channel_allowed(channel_id: str) -> bool:
@@ -79,7 +86,7 @@ def parse_flags(text: str) -> tuple[str, str, str]:
 def extract_question(event: dict) -> str:
     text = event.get("text", "")
     text = re.sub(r"<@[A-Z0-9]+>", "", text).strip()
-    return text
+    return text[:MAX_QUESTION_LENGTH]
 
 
 def parse_postmortem_args(text: str) -> dict:
@@ -94,11 +101,21 @@ def parse_postmortem_args(text: str) -> dict:
 async def handle_mention(event: dict, say, client):
     channel = event.get("channel", "")
     thread_ts = event.get("thread_ts", event.get("ts", ""))
+    user_id = event.get("user", event.get("user_id", "unknown"))
 
     if not is_channel_allowed(channel):
         await say(
             text="Channel not authorized",
             blocks=not_authorized_message(),
+            thread_ts=thread_ts,
+        )
+        return
+
+    if rate_limiter.is_rate_limited(user_id):
+        remaining = rate_limiter.remaining(user_id)
+        logger.warning("Rate limited user=%s channel=%s", user_id, channel)
+        await say(
+            text=f"Rate limited. You can send {remaining} more request(s) per 60s.",
             thread_ts=thread_ts,
         )
         return
@@ -114,8 +131,8 @@ async def handle_mention(event: dict, say, client):
         return
 
     logger.info(
-        "Mention received: channel=%s, question=%s, since=%s, service=%s",
-        channel, question[:100], since_flag or "default", service_flag or "none",
+        "Mention received: user=%s channel=%s, question=%s, since=%s, service=%s",
+        user_id, channel, question[:100], since_flag or "default", service_flag or "none",
     )
     await investigation_queue.enqueue(
         question, channel, thread_ts, since=since_flag, service=service_flag,
@@ -174,6 +191,9 @@ async def handle_postmortem(command: dict, say, client):
 @app.error
 async def global_error_handler(error, body, logger):
     logger.exception("Global error: %s", error)
+    safe_error = ErrorSanitizer.sanitize(str(error))
+    safe_error = ErrorSanitizer.truncate(safe_error)
+    logger.warning("Sanitized global error: %s", safe_error)
 
 
 async def main():
