@@ -14,6 +14,10 @@ build/
 # Runtime data
 investigator/data/reports/
 
+# Agent & Spec Kit
+.opencode/
+.specify/
+
 # IDE
 .vscode/
 .idea/
