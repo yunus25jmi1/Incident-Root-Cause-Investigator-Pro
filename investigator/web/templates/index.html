@@ -7,12 +7,89 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<div class="app" id="app">
-  <header>
-    <h1><span>Incident</span> Root-Cause Investigator</h1>
-    <p class="tagline">Powered by <span>Coral SQL</span> &middot; 5 sources &middot; AI-driven root cause analysis</p>
-  </header>
 
+<!-- ── Hero ── -->
+<section class="hero">
+  <div class="hero-badge">Hackathon Track 1 &middot; Pirates of the Coral-bean</div>
+  <h1 class="hero-title"><span class="accent">Incident</span> Root-Cause Investigator</h1>
+  <p class="hero-subtitle">
+    An AI agent that queries <strong>5 monitoring sources</strong> via <strong>Coral SQL</strong>,
+    correlates the signals, and produces a root-cause report — all from a Slack mention.
+  </p>
+  <div class="hero-cta">
+    <button class="btn btn-primary btn-lg" id="heroCta">Try it now &darr;</button>
+  </div>
+</section>
+
+<!-- ── How It Works ── -->
+<section class="section" id="howItWorks">
+  <h2 class="section-title">How it works</h2>
+  <div class="steps">
+    <div class="step-card">
+      <div class="step-number">1</div>
+      <div class="step-icon">&#x1F4AC;</div>
+      <h3>Ask</h3>
+      <p>Type a question like <em>"What caused the 5xx spike?"</em> in Slack or on this page.</p>
+    </div>
+    <div class="step-arrow">&rarr;</div>
+    <div class="step-card">
+      <div class="step-number">2</div>
+      <div class="step-icon">&#x1F4CA;</div>
+      <h3>Analyze</h3>
+      <p>The agent runs SQL queries across 5 sources via Coral, then feeds results to an LLM for iterative root-cause analysis.</p>
+    </div>
+    <div class="step-arrow">&rarr;</div>
+    <div class="step-card">
+      <div class="step-number">3</div>
+      <div class="step-icon">&#x1F4CB;</div>
+      <h3>Report</h3>
+      <p>Get a structured report: root cause, timeline, evidence chain, suggested actions, and source health.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── Sources ── -->
+<section class="section">
+  <h2 class="section-title">5 sources, one query</h2>
+  <div class="sources-showcase">
+    <div class="source-item"><div class="source-icon error">&#x26A0;</div><span>Sentry</span><small>Error tracking</small></div>
+    <div class="source-item"><div class="source-icon metric">&#x1F4C8;</div><span>Datadog</span><small>Metrics &amp; alerts</small></div>
+    <div class="source-item"><div class="source-icon code">&#x3C;&#x2F;&#x3E;</div><span>GitHub</span><small>Pull requests</small></div>
+    <div class="source-item"><div class="source-icon page">&#x1F514;</div><span>PagerDuty</span><small>Incidents &amp; on-call</small></div>
+    <div class="source-item"><div class="source-icon chat">&#x1F4AC;</div><span>Slack</span><small>Incident chat</small></div>
+  </div>
+</section>
+
+<!-- ── Architecture ── -->
+<section class="section">
+  <h2 class="section-title">Architecture</h2>
+  <div class="arch">
+    <div class="arch-col">
+      <div class="arch-box prompt">User Question</div>
+      <div class="arch-arrow">&darr;</div>
+      <div class="arch-box agent">Agent Core</div>
+      <div class="arch-arrow">&darr;</div>
+      <div class="arch-box llm">LLM + Coral SQL</div>
+    </div>
+    <div class="arch-col">
+      <div class="arch-box coral">&#x2194; Coral MCP</div>
+      <div class="arch-sources">
+        <div class="arch-source sentry">Sentry</div>
+        <div class="arch-source datadog">Datadog</div>
+        <div class="arch-source github">GitHub</div>
+        <div class="arch-source pd">PagerDuty</div>
+        <div class="arch-source slack">Slack</div>
+      </div>
+    </div>
+    <div class="arch-col">
+      <div class="arch-box prompt">Investigation Report</div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Investigation UI ── -->
+<section class="section" id="investigateSection">
+  <h2 class="section-title">Try it</h2>
   <div class="input-section" id="inputSection">
     <div class="examples" id="examples">
       <button class="chip" data-question="What caused the 5xx spike in checkout-service?">5xx spike in checkout-service</button>
@@ -22,8 +99,8 @@
       <button class="chip" data-question="Who was on-call for the last incident?">Who was on-call?</button>
     </div>
     <div class="search-row">
-      <input type="text" id="questionInput" placeholder="Ask about an incident, error, or outage..." autofocus>
-      <button class="btn btn-primary" id="investigateBtn">Investigate</button>
+      <input type="text" id="questionInput" placeholder="Ask about an incident, error, or outage...">
+      <button class="btn btn-primary btn-lg" id="investigateBtn">Investigate</button>
     </div>
   </div>
 
@@ -36,9 +113,10 @@
 
   <div class="empty-state" id="emptyState">
     <div class="icon">&#x1F50D;</div>
-    <h3>Investigate any incident</h3>
-    <p>Ask a question about an error, outage, or deploy. The agent will query 5 sources via Coral SQL and run AI-powered root cause analysis.</p>
+    <h3>Ask a question</h3>
+    <p>The agent will query 5 sources via Coral SQL and run AI-powered root cause analysis. Results appear here.</p>
   </div>
+</section>
 </div>
 
 <script>
@@ -51,8 +129,14 @@
   const resultsArea = document.getElementById('resultsArea');
   const emptyState = document.getElementById('emptyState');
   const examples = document.getElementById('examples');
+  const heroCta = document.getElementById('heroCta');
 
   let abortController = null;
+
+  heroCta.addEventListener('click', function() {
+    document.getElementById('investigateSection').scrollIntoView({ behavior: 'smooth' });
+    setTimeout(function() { questionInput.focus(); }, 500);
+  });
 
   examples.addEventListener('click', function(e) {
     const chip = e.target.closest('.chip');
@@ -82,6 +166,9 @@
     progressSteps.innerHTML = '';
     investigateBtn.disabled = true;
     investigateBtn.textContent = 'Investigating...';
+    setTimeout(function() {
+      progressSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 100);
 
     const phases = [
       { emoji: '📡', text: 'Phase 1: Gathering data from 5 sources...' },
