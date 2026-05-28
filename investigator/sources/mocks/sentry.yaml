@@ -2,10 +2,10 @@ name: mock_sentry
 version: "1.0.0"
 dsl_version: 3
 backend: jsonl
-description: Mock Sentry error groups for incident investigation demo
+description: Mock Sentry error groups
 tables:
   - name: issues
-    description: Mock Sentry error groups for incident investigation demo
+    description: Mock Sentry error groups
     source:
       location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/sentry
       glob: "issues.jsonl"

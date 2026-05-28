@@ -166,6 +166,7 @@ class AgentCore:
     async def investigate_with_reasoning(
         self, question: str, max_loops: int = 2,
         on_progress: Optional[callable] = None,
+        on_phase2_query: Optional[callable] = None,
         since: str = "", service: str = "",
     ) -> dict[str, Any]:
         if on_progress:
@@ -183,6 +184,7 @@ class AgentCore:
             on_phase2_start=lambda: on_progress(
                 "🔬", "Phase 2: Running follow-up queries..."
             ) if on_progress else None,
+            on_query=on_phase2_query,
         )
         if on_progress:
             await on_progress("✅", "Investigation complete. Generating report...")

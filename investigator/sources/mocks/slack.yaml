@@ -2,10 +2,10 @@ name: mock_slack
 version: "1.0.0"
 dsl_version: 3
 backend: jsonl
-description: Mock Slack messages for incident investigation demo
+description: Mock Slack messages
 tables:
   - name: messages
-    description: Mock Slack messages for incident investigation demo
+    description: Mock Slack messages
     source:
       location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/slack
       glob: "messages.jsonl"

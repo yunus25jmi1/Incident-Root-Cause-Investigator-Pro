@@ -194,6 +194,7 @@ class ReasoningEngine:
         max_loops: int = 2,
         incidents_channel: str = "incidents",
         on_phase2_start: Optional[callable] = None,
+        on_query: Optional[callable] = None,
         retry_budget: int = 2,
         max_consecutive_failures: int = 3,
     ) -> dict[str, Any]:
@@ -215,13 +216,16 @@ class ReasoningEngine:
                 for attempt in range(retry_budget + 1):
                     try:
                         qr = await coral_query_fn(filled)
-                        phase2_results.append({
+                        phase2_data = {
                             "sql": filled[:200],
                             "rows": qr.rows,
                             "row_count": qr.row_count,
-                        })
+                        }
+                        phase2_results.append(phase2_data)
                         logger.info("Phase 2 SQL (%d rows): %s", qr.row_count, filled[:100])
                         success = True
+                        if on_query:
+                            await on_query(phase2_data)
                         break
                     except Exception as e:
                         logger.warning("Phase 2 SQL failed (attempt %d/%d): %s — %s",

@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  investigator:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - USE_MOCK_SOURCES=true
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - CORAL_COMMAND=${CORAL_COMMAND:-coral}
+      - CORAL_ARGS=${CORAL_ARGS:-mcp-stdio}
+    volumes:
+      - .env:/app/.env:ro

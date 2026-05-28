@@ -46,5 +46,8 @@ activate-scenario:
 run:
 	$(PYTHON) -m $(PROJECT_DIR).bot.handler
 
+run-web:
+	$(PYTHON) -m uvicorn $(PROJECT_DIR).web.app:app --host 0.0.0.0 --port 8000 --reload
+
 verify:
 	$(PYTHON) -m pytest $(PROJECT_DIR)/tests/ -v --tb=short

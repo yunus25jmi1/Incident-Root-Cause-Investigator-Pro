@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Incident Root-Cause Investigator</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app" id="app">
+  <header>
+    <h1><span>Incident</span> Root-Cause Investigator</h1>
+    <p class="tagline">Powered by <span>Coral SQL</span> &middot; 5 sources &middot; AI-driven root cause analysis</p>
+  </header>
+
+  <div class="input-section" id="inputSection">
+    <div class="examples" id="examples">
+      <button class="chip" data-question="What caused the 5xx spike in checkout-service?">5xx spike in checkout-service</button>
+      <button class="chip" data-question="Why did we get database connection timeouts?">Database connection timeouts</button>
+      <button class="chip" data-question="What caused the CDN Cache Key config drift?">CDN Cache Key config drift</button>
+      <button class="chip" data-question="What caused the HTTP 502 errors?">HTTP 502 errors</button>
+      <button class="chip" data-question="Who was on-call for the last incident?">Who was on-call?</button>
+    </div>
+    <div class="search-row">
+      <input type="text" id="questionInput" placeholder="Ask about an incident, error, or outage..." autofocus>
+      <button class="btn btn-primary" id="investigateBtn">Investigate</button>
+    </div>
+  </div>
+
+  <div class="progress-section" id="progressSection" hidden>
+    <div class="progress-bar"><div class="progress-bar-fill" id="progressFill"></div></div>
+    <div class="progress-steps" id="progressSteps"></div>
+  </div>
+
+  <div id="resultsArea"></div>
+
+  <div class="empty-state" id="emptyState">
+    <div class="icon">&#x1F50D;</div>
+    <h3>Investigate any incident</h3>
+    <p>Ask a question about an error, outage, or deploy. The agent will query 5 sources via Coral SQL and run AI-powered root cause analysis.</p>
+  </div>
+</div>
+
+<script>
+(function() {
+  const questionInput = document.getElementById('questionInput');
+  const investigateBtn = document.getElementById('investigateBtn');
+  const progressSection = document.getElementById('progressSection');
+  const progressFill = document.getElementById('progressFill');
+  const progressSteps = document.getElementById('progressSteps');
+  const resultsArea = document.getElementById('resultsArea');
+  const emptyState = document.getElementById('emptyState');
+  const examples = document.getElementById('examples');
+
+  let abortController = null;
+
+  examples.addEventListener('click', function(e) {
+    const chip = e.target.closest('.chip');
+    if (!chip) return;
+    questionInput.value = chip.dataset.question;
+    startInvestigation();
+  });
+
+  investigateBtn.addEventListener('click', startInvestigation);
+  questionInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') startInvestigation();
+  });
+
+  function startInvestigation() {
+    const question = questionInput.value.trim();
+    if (!question) return;
+
+    if (abortController) {
+      abortController.abort();
+    }
+    abortController = new AbortController();
+
+    emptyState.hidden = true;
+    resultsArea.innerHTML = '';
+    progressSection.hidden = false;
+    progressFill.style.width = '0%';
+    progressSteps.innerHTML = '';
+    investigateBtn.disabled = true;
+    investigateBtn.textContent = 'Investigating...';
+
+    const phases = [
+      { emoji: '📡', text: 'Phase 1: Gathering data from 5 sources...' },
+      { emoji: '🧠', text: 'Analyzing initial signals...' },
+    ];
+    let currentPhase = 0;
+    let phaseDone = [];
+
+    function updateProgress(emoji, text) {
+      const isNewPhase = currentPhase < phases.length && text === phases[currentPhase].text;
+      if (isNewPhase) {
+        if (phaseDone.length > 0) {
+          phaseDone[phaseDone.length - 1].className = 'progress-step done';
+        }
+        const step = document.createElement('div');
+        step.className = 'progress-step active';
+        step.innerHTML = `<span class="emoji">${escapeHtml(emoji)}</span><span>${escapeHtml(text)}</span>`;
+        progressSteps.appendChild(step);
+        phaseDone.push(step);
+        currentPhase++;
+        progressFill.style.width = Math.min(30 * currentPhase, 60) + '%';
+      } else if (text.startsWith('Phase 2')) {
+        if (phaseDone.length > 0) {
+          phaseDone[phaseDone.length - 1].className = 'progress-step done';
+        }
+        const step = document.createElement('div');
+        step.className = 'progress-step active';
+        step.innerHTML = `<span class="emoji">${escapeHtml(emoji)}</span><span>${escapeHtml(text)}</span>`;
+        progressSteps.appendChild(step);
+        phaseDone.push(step);
+        const pct = Math.min(60 + phaseDone.length * 8, 85);
+        progressFill.style.width = pct + '%';
+      } else if (text.startsWith('Investigation complete')) {
+        if (phaseDone.length > 0) {
+          phaseDone[phaseDone.length - 1].className = 'progress-step done';
+        }
+        const step = document.createElement('div');
+        step.className = 'progress-step done';
+        step.innerHTML = `<span class="emoji">${escapeHtml(emoji)}</span><span>${escapeHtml(text)}</span>`;
+        progressSteps.appendChild(step);
+        phaseDone.push(step);
+        progressFill.style.width = '95%';
+      } else {
+        if (phaseDone.length > 0 && !phaseDone[phaseDone.length - 1].classList.contains('done')) {
+          phaseDone[phaseDone.length - 1].querySelector('span:last-child').textContent = text;
+        }
+      }
+    }
+
+    function renderReport(report) {
+      progressFill.style.width = '100%';
+      investigateBtn.disabled = false;
+      investigateBtn.textContent = 'Investigate';
+
+      const div = document.createElement('div');
+      div.className = 'report';
+
+      const confidenceRaw = (report.confidence || 'Medium').toLowerCase();
+      const confidence = {'high':'high','medium':'medium','low':'low'}[confidenceRaw] || 'medium';
+      const confidenceLabel = confidence.charAt(0).toUpperCase() + confidence.slice(1);
+
+      div.innerHTML = `
+        <div class="report-section">
+          <div class="summary-header">
+            <div>
+              <div class="question">${escapeHtml(report.question)}</div>
+              ${report.incident_id ? `<div style="margin-top:4px;font-size:13px;color:var(--text-dim)">Incident: <strong>${escapeHtml(report.incident_id)}</strong></div>` : ''}
+            </div>
+            <div class="confidence-badge ${confidence}">${confidenceLabel}</div>
+          </div>
+          <div class="summary-text">${escapeHtml(report.summary || '')}</div>
+        </div>
+
+        ${report.root_cause ? `
+        <div class="report-section">
+          <h2><span class="icon">&#x1F50D;</span> Root Cause</h2>
+          <p style="font-size:14px;line-height:1.7">${escapeHtml(report.root_cause)}</p>
+        </div>` : ''}
+
+        ${report.analysis ? `
+        <div class="report-section">
+          <h2><span class="icon">&#x1F9E0;</span> Analysis</h2>
+          <p style="font-size:14px;line-height:1.7;white-space:pre-wrap">${escapeHtml(report.analysis)}</p>
+        </div>` : ''}
+
+        ${report.timeline && report.timeline.length ? `
+        <div class="report-section">
+          <h2><span class="icon">&#x1F4C5;</span> Timeline (${report.timeline.length} events)</h2>
+          <ul class="timeline-list">
+            ${report.timeline.map(function(e) {
+              const typeAllowed = {error:1,deploy:1,incident:1,page:1,discussion:1,event:1};
+              const type = typeAllowed[(e.type || '').toLowerCase()] ? (e.type || '').toLowerCase() : 'event';
+              const time = e.time || '';
+              const title = e.title || e.event || '';
+              const detail = e.detail || '';
+              return `<li class="timeline-item ${escapeHtml(type)}">
+                <div class="time">${escapeHtml(time)}</div>
+                <div class="desc">
+                  <span class="type-tag">${escapeHtml(type)}</span>
+                  ${escapeHtml(title)}
+                  ${detail ? `<span class="detail">${escapeHtml(detail)}</span>` : ''}
+                </div>
+              </li>`;
+            }).join('')}
+          </ul>
+        </div>` : ''}
+
+        ${report.suggested_actions && report.suggested_actions.length ? `
+        <div class="report-section">
+          <h2><span class="icon">&#x2705;</span> Suggested Actions</h2>
+          <ul class="action-list">
+            ${report.suggested_actions.map(function(a) {
+              const priorityAllowed = {p0:'p0',p1:'p1',p2:'p2'};
+              const p = priorityAllowed[(a.priority || 'P2').toLowerCase().replace(/\s/g,'')] || 'p2';
+              return `<li class="action-item"><span class="priority ${escapeHtml(p)}">${escapeHtml(a.priority)}</span> ${escapeHtml(a.description)}</li>`;
+            }).join('')}
+          </ul>
+        </div>` : ''}
+
+        ${report.people_involved && report.people_involved.length ? `
+        <div class="report-section">
+          <h2><span class="icon">&#x1F465;</span> People Involved</h2>
+          <div class="people-list">
+            ${report.people_involved.map(function(p) {
+              return `<span class="person-tag">${escapeHtml(p.name)} <span class="role">${escapeHtml(p.role)}</span></span>`;
+            }).join('')}
+          </div>
+        </div>` : ''}
+
+        ${report.sources ? `
+        <div class="report-section">
+          <h2><span class="icon">&#x1F4E1;</span> Source Health</h2>
+          <div class="sources-grid">
+            ${Object.entries(report.sources).map(function(s) {
+              const name = s[0], info = s[1];
+              const status = info.status || 'empty';
+              return `<div class="source-card">
+                <div class="name">${escapeHtml(name)}</div>
+                <div class="status"><span class="status-dot ${status}"></span> ${status}${info.count !== undefined ? ' &middot; ' + info.count + ' rows' : ''}</div>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>` : ''}
+
+        ${report.phase2_run ? `
+        <div class="report-section">
+          <h2><span class="icon">&#x1F4CA;</span> Phase 2 Queries</h2>
+          <div class="phase2-queries">
+            <p style="font-size:13px;color:var(--text-dim);margin-bottom:8px">
+              Health: ${report.phase2_health ? report.phase2_health.total_queries + ' queries, ' + report.phase2_health.failed_queries + ' failed, ' + report.phase2_health.retries_used + ' retries' : 'N/A'}
+            </p>
+          </div>
+        </div>` : ''}
+      `;
+
+      div.querySelectorAll('.report-section').forEach(function(section) {
+        section.style.animation = 'none';
+        section.offsetHeight;
+        section.style.animation = 'fadeIn 0.3s ease';
+      });
+
+      resultsArea.appendChild(div);
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    const url = '/api/investigate?question=' + encodeURIComponent(question)
+      + '&since=3h&service=checkout-service';
+
+    const eventSource = new EventSource(url);
+
+    eventSource.addEventListener('progress', function(e) {
+      const data = JSON.parse(e.data);
+      updateProgress(data.emoji, data.text);
+    });
+
+    eventSource.addEventListener('phase2_query', function(e) {
+      const data = JSON.parse(e.data);
+      const text = 'Phase 2 SQL: ' + (data.sql || '').substring(0, 80) + '... (' + data.row_count + ' rows)';
+      updateProgress('🔬', text);
+    });
+
+    eventSource.addEventListener('complete', function(e) {
+      const report = JSON.parse(e.data);
+      eventSource.close();
+      renderReport(report);
+    });
+
+    eventSource.addEventListener('error', function(e) {
+      eventSource.close();
+      if (e.data) {
+        try {
+          const data = JSON.parse(e.data);
+          resultsArea.innerHTML = '<div class="error-box"><h3>Investigation Failed</h3><p>' + escapeHtml(data.message) + '</p></div>';
+        } catch(_) {
+          resultsArea.innerHTML = '<div class="error-box"><h3>Investigation Failed</h3><p>' + escapeHtml(e.data) + '</p></div>';
+        }
+      } else {
+        if (eventSource.readyState === EventSource.CLOSED && !resultsArea.querySelector('.report')) {
+          resultsArea.innerHTML = '<div class="error-box"><h3>Connection Lost</h3><p>The investigation stream was interrupted. Please try again.</p></div>';
+        }
+      }
+      investigateBtn.disabled = false;
+      investigateBtn.textContent = 'Investigate';
+      progressFill.style.width = '100%';
+    });
+  }
+})();
+</script>
+</body>
+</html>

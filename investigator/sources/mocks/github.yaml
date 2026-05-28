@@ -2,10 +2,10 @@ name: mock_github
 version: "1.0.0"
 dsl_version: 3
 backend: jsonl
-description: Mock GitHub pull requests for incident investigation demo
+description: Mock GitHub pull requests
 tables:
   - name: pulls
-    description: Mock GitHub pull requests for incident investigation demo
+    description: Mock GitHub pull requests
     source:
       location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/github
       glob: "pulls.jsonl"

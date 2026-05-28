@@ -4,6 +4,7 @@ import re
 import asyncio
 import logging
 import random
+import shutil
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -219,6 +220,13 @@ class CoralClient:
             raise CoralError(
                 "Already connected to Coral MCP",
                 QueryErrorCode.ALREADY_CONNECTED,
+            )
+        if self._command != "coral" and not shutil.which(self._command):
+            raise CoralError(
+                f"Coral command not found or invalid: {self._command}. "
+                f"Ensure Coral is installed and CORAL_COMMAND is a valid path.",
+                QueryErrorCode.CONNECTION_FAILED,
+                {"command": self._command},
             )
         self._exit_stack = AsyncExitStack()
         try:

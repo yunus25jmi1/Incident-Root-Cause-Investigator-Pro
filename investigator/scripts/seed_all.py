@@ -1,12 +1,16 @@
 """
-Generate 30-40 precise mock records per source matching real Coral schemas.
+Single realistic incident — CDN Cache Key config drift.
+Inspired by Cloudflare 2022-06-21 Tiered Cache outage + Fastly 2021-06-08 global 502 outage.
+
+Story:
+  PR #4381 ("Optimize cache key for tiered distribution") is deployed to staging, promoted to prod.
+  The change skips cache-key normalization for authenticated requests, causing every request to
+  miss cache and hit the origin. Origin pool is overwhelmed → 502s globally.
+  On-call detects via Sentry spike → Datadog alert → PagerDuty page.
+  Revert PR #4382 is merged, cache purged. Incident resolved in 47 minutes.
+  Postmortem identifies missing code review and missing canary deployment.
 
 Sources: sentry, datadog, github, pagerduty, slack
-Output: JSONL files + YAML manifests for mock imported sources
-
-Usage:
-    python -m investigator.scripts.seed_all
-    python -m investigator.scripts.seed_all --activate  # activate as live mock sources
 """
 
 import argparse
@@ -14,6 +18,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 from datetime import datetime, timezone, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -22,431 +27,428 @@ logger = logging.getLogger(__name__)
 BASE_DIR = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "sources", "mocks")
 )
-NOW = datetime(2026, 5, 27, 4, 0, 0, tzinfo=timezone.utc)
+
+# Incident timeline reference:
+# 2026-05-27 02:00 UTC — PR #4381 deployed to prod
+# 02:02 — Sentry detects CacheKeyMismatchError spike (1462/min)
+# 02:03 — Datadog auto-creates incident SEV-1
+# 02:04 — PagerDuty INC-804 triggers high-urgency
+# 02:04:30 — Slack #incidents lights up
+# 02:05 — Charlie (on-call) acknowledges
+# 02:06 — Revert PR #4382 merged
+# 02:10 — Cache purge begins
+# 02:47 — Error rate returns to baseline
+# 02:48 — INC-804 resolved
+# 03:00 — Postmortem Slack thread starts
+
+INCIDENT_EPOCH = datetime.now(timezone.utc) - timedelta(hours=3)
 
 
-def dt(offset_hours: float) -> str:
-    return (NOW + timedelta(hours=offset_hours)).isoformat().replace("+00:00", "Z")
+def dt(hours: float) -> str:
+    return (INCIDENT_EPOCH + timedelta(hours=hours)).isoformat().replace("+00:00", "Z")
+
+
+def dt_min(mins: float) -> str:
+    return dt(mins / 60.0)
 
 
 # ── Sentry Issues ────────────────────────────────────────────────────
 SENTRY_ISSUES = [
-    # Incident 1: PR merge broke checkout (May 24, ~36h ago)
-    dict(id="SENT-001", short_id="SENTRY-1A", title="ZeroDivisionError in CheckoutController.calculate_total",
-         status="unresolved", level="error", count=847, user_count=312,
-         first_seen=dt(-36.5), last_seen=dt(-36.0), project="checkout-service",
-         query="ZeroDivisionError CheckoutController"),
-    dict(id="SENT-002", short_id="SENTRY-2B", title="NullReferenceException in PaymentGateway.authorize",
-         status="unresolved", level="fatal", count=423, user_count=189,
-         first_seen=dt(-36.3), last_seen=dt(-35.9), project="payment-service",
-         query="NullReferenceException PaymentGateway"),
-    dict(id="SENT-003", short_id="SENTRY-3C", title="TypeError: Cannot read properties of undefined (reading 'price')",
-         status="unresolved", level="error", count=215, user_count=98,
-         first_seen=dt(-36.2), last_seen=dt(-35.8), project="checkout-service",
-         query="TypeError price undefined"),
-    # Incident 2: Database slowdown (May 25, ~12h ago)
-    dict(id="SENT-004", short_id="SENTRY-4D", title="ConnectionTimeoutError: Unable to acquire connection from pool",
-         status="unresolved", level="error", count=1560, user_count=534,
-         first_seen=dt(-12.5), last_seen=dt(-12.0), project="api-gateway",
-         query="ConnectionTimeoutError pool"),
-    dict(id="SENT-005", short_id="SENTRY-5E", title="psycopg2.OperationalError: FATAL: too many connections",
-         status="unresolved", level="fatal", count=892, user_count=401,
-         first_seen=dt(-12.4), last_seen=dt(-11.9), project="user-service",
-         query="OperationalError too many connections"),
-    dict(id="SENT-006", short_id="SENTRY-6F", title="Django.db.utils.DatabaseError: deadlock detected",
-         status="unresolved", level="error", count=334, user_count=145,
-         first_seen=dt(-12.3), last_seen=dt(-11.8), project="order-service",
-         query="DatabaseError deadlock"),
-    # Incident 3: Config drift (May 26, ~8h ago)
-    dict(id="SENT-007", short_id="SENTRY-7G", title="Http502Error: upstream connect error or disconnect/reset before headers",
-         status="unresolved", level="error", count=2100, user_count=876,
-         first_seen=dt(-8.5), last_seen=dt(-8.0), project="checkout-service",
-         query="Http502Error upstream"),
-    dict(id="SENT-008", short_id="SENTRY-8H", title="EnvoyBadResponse: upstream connection error",
-         status="unresolved", level="error", count=1100, user_count=512,
-         first_seen=dt(-8.4), last_seen=dt(-7.9), project="api-gateway",
-         query="EnvoyBadResponse upstream"),
-    # Scattered warnings and low-severity issues
-    dict(id="SENT-009", short_id="SENTRY-9I", title="MemoryWarning: heap allocation exceeded 1GB",
-         status="unresolved", level="warning", count=45, user_count=12,
-         first_seen=dt(-48.0), last_seen=dt(-2.0), project="checkout-service",
-         query="MemoryWarning heap"),
-    dict(id="SENT-010", short_id="SENTRY-10J", title="SlowQueryWarning: SELECT on orders table took 12.3s",
-         status="unresolved", level="warning", count=78, user_count=23,
-         first_seen=dt(-72.0), last_seen=dt(-6.0), project="order-service",
-         query="SlowQueryWarning orders"),
-    dict(id="SENT-011", short_id="SENTRY-11K", title="RateLimitWarning: API rate limit at 85%",
-         status="unresolved", level="warning", count=23, user_count=8,
-         first_seen=dt(-24.0), last_seen=dt(-4.0), project="api-gateway",
-         query="RateLimitWarning rate limit"),
-    dict(id="SENT-012", short_id="SENTRY-12L", title="ValidationError: Invalid email format in signup",
-         status="resolved", level="error", count=156, user_count=89,
-         first_seen=dt(-96.0), last_seen=dt(-48.0), project="user-service",
-         query="ValidationError email"),
-    dict(id="SENT-013", short_id="SENTRY-13M", title="IntegrityError: duplicate key value violates unique constraint",
-         status="resolved", level="error", count=67, user_count=34,
-         first_seen=dt(-72.0), last_seen=dt(-36.0), project="user-service",
-         query="IntegrityError duplicate key"),
-    dict(id="SENT-014", short_id="SENTRY-14N", title="KeyError: 'discount_code' not found in session",
-         status="unresolved", level="error", count=234, user_count=112,
-         first_seen=dt(-18.0), last_seen=dt(-6.0), project="checkout-service",
-         query="KeyError discount_code"),
-    dict(id="SENT-015", short_id="SENTRY-15O", title="JSONDecodeError: Unexpected token in response body",
-         status="unresolved", level="error", count=89, user_count=45,
-         first_seen=dt(-24.0), last_seen=dt(-10.0), project="payment-service",
-         query="JSONDecodeError response"),
-    dict(id="SENT-016", short_id="SENTRY-16P", title="TimeoutError: Request to shipping-service timed out after 30s",
-         status="unresolved", level="error", count=412, user_count=178,
-         first_seen=dt(-20.0), last_seen=dt(-5.0), project="order-service",
-         query="TimeoutError shipping-service"),
-    dict(id="SENT-017", short_id="SENTRY-17Q", title="IndexError: list index out of range in InventoryService.get_stock",
-         status="unresolved", level="error", count=56, user_count=28,
-         first_seen=dt(-30.0), last_seen=dt(-12.0), project="inventory-service",
-         query="IndexError get_stock"),
-    dict(id="SENT-018", short_id="SENTRY-18R", title="ValueError: invalid literal for int() with base 10: 'N/A'",
-         status="unresolved", level="error", count=123, user_count=67,
-         first_seen=dt(-40.0), last_seen=dt(-15.0), project="inventory-service",
-         query="ValueError int base 10"),
-    dict(id="SENT-019", short_id="SENTRY-19S", title="AttributeError: 'NoneType' object has no attribute 'get'",
-         status="unresolved", level="error", count=345, user_count=156,
-         first_seen=dt(-28.0), last_seen=dt(-8.0), project="checkout-service",
-         query="AttributeError NoneType get"),
-    dict(id="SENT-020", short_id="SENTRY-20T", title="RuntimeError: Event loop is closed",
-         status="unresolved", level="error", count=12, user_count=5,
-         first_seen=dt(-50.0), last_seen=dt(-3.0), project="api-gateway",
-         query="RuntimeError event loop closed"),
-    dict(id="SENT-021", short_id="SENTRY-21U", title="AssertionError: Expected 200 OK but got 503",
-         status="unresolved", level="error", count=78, user_count=34,
-         first_seen=dt(-16.0), last_seen=dt(-7.0), project="checkout-service",
-         query="AssertionError 503"),
-    dict(id="SENT-022", short_id="SENTRY-22V", title="RecursionError: maximum recursion depth exceeded",
-         status="unresolved", level="error", count=5, user_count=2,
-         first_seen=dt(-100.0), last_seen=dt(-50.0), project="order-service",
-         query="RecursionError depth"),
-    dict(id="SENT-023", short_id="SENTRY-23W", title="FileNotFoundError: config.yaml not found in /etc/app/",
-         status="resolved", level="error", count=1, user_count=1,
-         first_seen=dt(-120.0), last_seen=dt(-119.0), project="deploy-service",
-         query="FileNotFoundError config.yaml"),
-    dict(id="SENT-024", short_id="SENTRY-24X", title="PermissionError: Access denied to S3 bucket production-logs",
-         status="unresolved", level="error", count=34, user_count=12,
-         first_seen=dt(-60.0), last_seen=dt(-5.0), project="infra-service",
-         query="PermissionError S3"),
-    dict(id="SENT-025", short_id="SENTRY-25Y", title="Warning: Deprecated API /v1/checkout used by mobile client",
-         status="unresolved", level="warning", count=890, user_count=450,
-         first_seen=dt(-96.0), last_seen=dt(-1.0), project="checkout-service",
-         query="Deprecated API v1 checkout"),
-    dict(id="SENT-026", short_id="SENTRY-26Z", title="OSError: [Errno 24] Too many open files",
-         status="unresolved", level="error", count=67, user_count=23,
-         first_seen=dt(-14.0), last_seen=dt(-6.0), project="api-gateway",
-         query="OSError too many open files"),
-    dict(id="SENT-027", short_id="SENTRY-27A", title="Exception: Unhandled promise rejection in payment-webhook",
-         status="unresolved", level="error", count=234, user_count=89,
-         first_seen=dt(-22.0), last_seen=dt(-9.0), project="payment-service",
-         query="Unhandled promise rejection"),
-    dict(id="SENT-028", short_id="SENTRY-28B", title="SSLHandshakeError: certificate verify failed",
-         status="resolved", level="error", count=12, user_count=4,
-         first_seen=dt(-200.0), last_seen=dt(-150.0), project="payment-service",
-         query="SSLHandshakeError certificate"),
-    dict(id="SENT-029", short_id="SENTRY-29C", title="OverflowError: integer overflow in discount calculation",
-         status="unresolved", level="error", count=45, user_count=18,
-         first_seen=dt(-10.0), last_seen=dt(-4.0), project="checkout-service",
-         query="OverflowError discount"),
-    dict(id="SENT-030", short_id="SENTRY-30D", title="LookupError: No matching shipping rate for destination",
-         status="unresolved", level="error", count=89, user_count=56,
-         first_seen=dt(-15.0), last_seen=dt(-2.0), project="order-service",
-         query="LookupError shipping rate"),
-    dict(id="SENT-031", short_id="SENTRY-31E", title="NotImplementedError: Bulk discount not implemented for region EU",
-         status="resolved", level="warning", count=3, user_count=1,
-         first_seen=dt(-300.0), last_seen=dt(-48.0), project="checkout-service",
-         query="NotImplementedError bulk discount"),
-    dict(id="SENT-032", short_id="SENTRY-32F", title="UnboundLocalError: local variable 'total' referenced before assignment",
-         status="unresolved", level="error", count=156, user_count=67,
-         first_seen=dt(-18.0), last_seen=dt(-6.0), project="checkout-service",
-         query="UnboundLocalError total"),
-    dict(id="SENT-033", short_id="SENTRY-33G", title="ConnectionResetError: [Errno 104] Connection reset by peer",
-         status="unresolved", level="error", count=445, user_count=189,
-         first_seen=dt(-12.0), last_seen=dt(-3.0), project="api-gateway",
-         query="ConnectionResetError 104"),
-    dict(id="SENT-034", short_id="SENTRY-34H", title="Warning: High latency on /api/checkout endpoint (avg 4.5s)",
-         status="unresolved", level="warning", count=230, user_count=120,
-         first_seen=dt(-24.0), last_seen=dt(-1.0), project="checkout-service",
-         query="High latency checkout"),
-    dict(id="SENT-035", short_id="SENTRY-35I", title="BrokenPipeError: [Errno 32] Broken pipe writing to redis",
-         status="unresolved", level="error", count=78, user_count=34,
-         first_seen=dt(-8.0), last_seen=dt(-2.0), project="checkout-service",
-         query="BrokenPipeError redis"),
+    dict(id="SENT-001", short_id="CDN-1A",
+         title="CacheKeyMismatchError: Origin returned 502 for cache key '//checkout/v1/'",
+         status="unresolved", level="error", count=1462, user_count=8900,
+         first_seen=dt_min(2), last_seen=dt_min(47), project="cdn-edge",
+         query="CacheKeyMismatchError"),
+    dict(id="SENT-002", short_id="CDN-2B",
+         title="Http502Error: upstream connect error or disconnect/reset before headers",
+         status="unresolved", level="fatal", count=8400, user_count=32000,
+         first_seen=dt_min(2), last_seen=dt_min(47), project="api-gateway",
+         query="Http502Error upstream connect"),
+    dict(id="SENT-003", short_id="CDN-3C",
+         title="OriginConnectionTimeout: origin pool at 100% capacity, request queued 31s",
+         status="unresolved", level="error", count=3200, user_count=15000,
+         first_seen=dt_min(3), last_seen=dt_min(46), project="cdn-origin",
+         query="OriginConnectionTimeout pool capacity"),
+    dict(id="SENT-004", short_id="CDN-4D",
+         title="CacheMissRatioExceeded: 99.7% of requests bypassing cache (threshold: 5%)",
+         status="unresolved", level="error", count=1, user_count=0,
+         first_seen=dt_min(4), last_seen=dt_min(45), project="cdn-edge",
+         query="CacheMissRatioExceeded"),
+    dict(id="SENT-005", short_id="CDN-5E",
+         title="OriginPoolExhaustion: all 128 connections in pool 'us-east-1a' in use",
+         status="unresolved", level="fatal", count=5600, user_count=22000,
+         first_seen=dt_min(4), last_seen=dt_min(45), project="cdn-origin",
+         query="OriginPoolExhaustion"),
+    dict(id="SENT-006", short_id="CDN-6F",
+         title="Warning: Cache hit ratio dropped from 92% to 0.3% on /api/checkout endpoint",
+         status="unresolved", level="warning", count=1, user_count=0,
+         first_seen=dt_min(5), last_seen=dt_min(44), project="cdn-edge",
+         query="Cache hit ratio"),
+    dict(id="SENT-007", short_id="CDN-7G",
+         title="TimeoutError: checkout-service upstream timed out (30s) on cache-miss requests",
+         status="unresolved", level="error", count=2100, user_count=9800,
+         first_seen=dt_min(5), last_seen=dt_min(45), project="checkout-service",
+         query="TimeoutError checkout upstream"),
+    dict(id="SENT-008", short_id="CDN-8H",
+         title="CircuitBreakerOpen: payment-service circuit breaker opened at 78% failure rate",
+         status="unresolved", level="error", count=3400, user_count=16000,
+         first_seen=dt_min(6), last_seen=dt_min(44), project="payment-service",
+         query="CircuitBreakerOpen payment"),
+    dict(id="SENT-009", short_id="CDN-9I",
+         title="Warning: Backpressure signal from origin pool, 3400 requests dropped",
+         status="unresolved", level="warning", count=1, user_count=0,
+         first_seen=dt_min(6), last_seen=dt_min(43), project="cdn-origin",
+         query="Backpressure origin pool"),
+    dict(id="SENT-010", short_id="CDN-10J",
+         title="CachePurgeComplete: full cache purge initiated by on-call [Charlie]",
+         status="resolved", level="info", count=1, user_count=1,
+         first_seen=dt_min(10), last_seen=dt_min(10), project="cdn-edge",
+         query="CachePurgeComplete"),
+    dict(id="SENT-011", short_id="CDN-11K",
+         title="ErrorRateNormalized: 502 rate returned to baseline (0.12%) at 02:47 UTC",
+         status="resolved", level="info", count=1, user_count=0,
+         first_seen=dt_min(47), last_seen=dt_min(47), project="cdn-edge",
+         query="ErrorRateNormalized"),
+    dict(id="SENT-012", short_id="CDN-12L",
+         title="SlowQueryWarning: SELECT on cache_entries table took 45s during incident",
+         status="unresolved", level="warning", count=23, user_count=5,
+         first_seen=dt_min(8), last_seen=dt_min(46), project="cdn-edge",
+         query="SlowQueryWarning cache_entries"),
+    dict(id="SENT-013", short_id="CDN-13M",
+         title="ValidationError: missing 'x-cache-key' header in 78% of requests at edge",
+         status="unresolved", level="error", count=7800, user_count=29000,
+         first_seen=dt_min(2), last_seen=dt_min(47), project="cdn-edge",
+         query="ValidationError x-cache-key"),
+    dict(id="SENT-014", short_id="CDN-14N",
+         title="MemoryWarning: edge node heap usage 97% due to uncached request surge",
+         status="unresolved", level="warning", count=45, user_count=0,
+         first_seen=dt_min(10), last_seen=dt_min(45), project="cdn-edge",
+         query="MemoryWarning edge heap"),
+    dict(id="SENT-015", short_id="CDN-15O",
+         title="ConfigDeployDetected: tiered-cache config v2.1.8 rolled out to 100% of POPs",
+         status="resolved", level="info", count=1, user_count=1,
+         first_seen=dt(0), last_seen=dt(0), project="deploy-service",
+         query="ConfigDeployDetected tiered-cache"),
 ]
 
 # ── Datadog Incidents ────────────────────────────────────────────────
 DATADOG_INCIDENTS = [
-    dict(id="dd-inc-001", title="High error rate on checkout-service", status="active",
-         severity="SEV-2", created=dt(-36.5), modified=dt(-35.0), resolved_at=None, customer_impacted=True),
-    dict(id="dd-inc-002", title="Database connection pool exhaustion", status="active",
-         severity="SEV-3", created=dt(-12.5), modified=dt(-11.0), resolved_at=None, customer_impacted=True),
-    dict(id="dd-inc-003", title="Deployment config drift - HTTP 502 errors", status="active",
-         severity="SEV-2", created=dt(-8.5), modified=dt(-7.5), resolved_at=None, customer_impacted=True),
-    dict(id="dd-inc-004", title="Payment gateway latency spike", status="resolved",
-         severity="SEV-3", created=dt(-48.0), modified=dt(-46.0), resolved_at=dt(-45.0), customer_impacted=True),
-    dict(id="dd-inc-005", title="Inventory sync failure", status="resolved",
-         severity="SEV-4", created=dt(-72.0), modified=dt(-70.0), resolved_at=dt(-69.0), customer_impacted=False),
-    dict(id="dd-inc-006", title="SSL certificate expiry on api-gateway", status="resolved",
-         severity="SEV-3", created=dt(-96.0), modified=dt(-94.0), resolved_at=dt(-90.0), customer_impacted=True),
-    dict(id="dd-inc-007", title="Redis cluster node failure", status="active",
-         severity="SEV-3", created=dt(-10.0), modified=dt(-9.0), resolved_at=None, customer_impacted=True),
-    dict(id="dd-inc-008", title="Order processing backlog", status="active",
-         severity="SEV-4", created=dt(-6.0), modified=dt(-5.0), resolved_at=None, customer_impacted=False),
-    dict(id="dd-inc-009", title="CDN cache purge failure", status="resolved",
-         severity="SEV-5", created=dt(-120.0), modified=dt(-119.0), resolved_at=dt(-118.0), customer_impacted=False),
-    dict(id="dd-inc-010", title="Shipping rate API degradation", status="active",
-         severity="SEV-3", created=dt(-14.0), modified=dt(-13.0), resolved_at=None, customer_impacted=True),
-    dict(id="dd-inc-011", title="Memory leak on checkout containers", status="active",
-         severity="SEV-3", created=dt(-20.0), modified=dt(-18.0), resolved_at=None, customer_impacted=True),
-    dict(id="dd-inc-012", title="Docker registry pull rate limit", status="resolved",
-         severity="SEV-4", created=dt(-168.0), modified=dt(-166.0), resolved_at=dt(-165.0), customer_impacted=False),
-    dict(id="dd-inc-013", title="Elasticsearch cluster yellow status", status="active",
-         severity="SEV-4", created=dt(-4.0), modified=dt(-3.0), resolved_at=None, customer_impacted=False),
-    dict(id="dd-inc-014", title="Kubernetes pod crash loop on payment", status="active",
-         severity="SEV-2", created=dt(-7.0), modified=dt(-6.0), resolved_at=None, customer_impacted=True),
-    dict(id="dd-inc-015", title="PostgreSQL replication lag exceeds 10s", status="active",
-         severity="SEV-3", created=dt(-3.0), modified=dt(-2.0), resolved_at=None, customer_impacted=True),
+    dict(id="dd-inc-001", title="[AUTO] CDN error rate > 5% — 502 spike on all POPs",
+         status="active", severity="SEV-1",
+         created=dt_min(3), modified=dt_min(48), resolved_at=dt_min(48),
+         customer_impacted=True),
+    dict(id="dd-inc-002", title="Cache hit ratio collapse: 92% → 0.3% on /api/checkout",
+         status="active", severity="SEV-2",
+         created=dt_min(3), modified=dt_min(47), resolved_at=dt_min(47),
+         customer_impacted=True),
+    dict(id="dd-inc-003", title="Origin pool 'us-east-1a' at 100% connection utilization",
+         status="active", severity="SEV-1",
+         created=dt_min(4), modified=dt_min(46), resolved_at=dt_min(46),
+         customer_impacted=True),
+    dict(id="dd-inc-004", title="checkout-service p99 latency 30s (baseline: 120ms)",
+         status="active", severity="SEV-2",
+         created=dt_min(5), modified=dt_min(45), resolved_at=dt_min(45),
+         customer_impacted=True),
+    dict(id="dd-inc-005", title="payment-service circuit breaker opened at 78% failure",
+         status="active", severity="SEV-2",
+         created=dt_min(6), modified=dt_min(44), resolved_at=dt_min(44),
+         customer_impacted=True),
+    dict(id="dd-inc-006", title="Global traffic drop: request volume down 62% (users hitting 502)",
+         status="active", severity="SEV-1",
+         created=dt_min(5), modified=dt_min(48), resolved_at=dt_min(48),
+         customer_impacted=True),
+    dict(id="dd-inc-007", title="Edge node CPU 97% across all POPs (us-east, eu-west, ap-south)",
+         status="active", severity="SEV-3",
+         created=dt_min(10), modified=dt_min(45), resolved_at=dt_min(45),
+         customer_impacted=True),
+    dict(id="dd-inc-008", title="[RESOLVED] Full cache purge completed — error rate recovering",
+         status="resolved", severity="SEV-4",
+         created=dt_min(11), modified=dt_min(47), resolved_at=dt_min(47),
+         customer_impacted=False),
 ]
 
 # ── GitHub Pulls ─────────────────────────────────────────────────────
 GITHUB_PULLS = [
-    dict(number=4321, title="fix: add null check in CheckoutController.calculate_total",
-         state="merged", merged=True, draft=False, body="Adds null check for price parameter to prevent ZeroDivisionError",
-         user__login="Alice", user="Alice", base__ref="main", head__label="fix/checkout-validation",
-         created_at=dt(-48.0), merged_at=dt(-36.5), closed_at=dt(-36.5), updated_at=dt(-36.4),
-         html_url="https://github.com/yunus25jmi1/Incident-Root-Cause-Investigator-Pro/pull/4321",
-         additions=42, deletions=8, changed_files=3, comments=5, commits=2, mergeable_state="clean",
-         owner="yunus25jmi1", repo="Incident-Root-Cause-Investigator-Pro"),
-    dict(number=4322, title="feat: add discount code validation middleware",
+    dict(number=4381, title="feat: optimize cache key for tiered distribution",
          state="merged", merged=True, draft=False,
-         body="Validates discount codes before passing to payment gateway",
-         user__login="Bob", user="Bob", base__ref="main", head__label="feat/discount-validation",
-         created_at=dt(-48.0), merged_at=dt(-36.0), closed_at=dt(-36.0), updated_at=dt(-35.9),
-         html_url="https://github.com/yunus25jmi1/Incident-Root-Cause-Investigator-Pro/pull/4322",
-         additions=85, deletions=12, changed_files=5, comments=3, commits=3, mergeable_state="clean",
-         owner="yunus25jmi1", repo="Incident-Root-Cause-Investigator-Pro"),
-    dict(number=4323, title="fix: increase DB connection pool size to 50",
+         body="""Normalizes cache keys for authenticated vs anonymous requests.
+Cache key now includes 'x-cache-key' header when present.
+Deployed to 100% of edge POPs via progressive rollout.
+
+⚠ Root cause of INC-804""",
+         user__login="Alice", user="Alice",
+         base__ref="main", head__label="feat/tiered-cache-key",
+         created_at=dt(-48), merged_at=dt(0), closed_at=dt(0), updated_at=dt(0),
+         html_url="https://github.com/acme-corp/cdn-infra/pull/4381",
+         additions=87, deletions=12, changed_files=4, comments=3, commits=2,
+         mergeable_state="clean",
+         owner="acme-corp", repo="cdn-infra"),
+    dict(number=4382, title='revert: "feat: optimize cache key for tiered distribution"',
          state="merged", merged=True, draft=False,
-         body="Increases max_connections from 20 to 50 to handle traffic spikes",
-         user__login="Charlie", user="Charlie", base__ref="main", head__label="fix/db-pool-size",
-         created_at=dt(-24.0), merged_at=dt(-12.5), closed_at=dt(-12.5), updated_at=dt(-12.4),
-         html_url="https://github.com/yunus25jmi1/Incident-Root-Cause-Investigator-Pro/pull/4323",
-         additions=15, deletions=5, changed_files=2, comments=8, commits=1, mergeable_state="clean",
-         owner="yunus25jmi1", repo="Incident-Root-Cause-Investigator-Pro"),
-    dict(number=4324, title="revert: 'fix: increase DB connection pool size to 50'",
+         body="Immediately reverts PR #4381. Cache key normalization had a bug where "
+              "authenticated requests bypassed the cache entirely, causing origin overload.",
+         user__login="Charlie", user="Charlie",
+         base__ref="main", head__label="revert/tiered-cache-key",
+         created_at=dt_min(5), merged_at=dt_min(6), closed_at=dt_min(6), updated_at=dt_min(6),
+         html_url="https://github.com/acme-corp/cdn-infra/pull/4382",
+         additions=12, deletions=87, changed_files=4, comments=5, commits=1,
+         mergeable_state="clean",
+         owner="acme-corp", repo="cdn-infra"),
+    dict(number=4380, title="feat: add distributed tracing headers to cdn-edge",
          state="merged", merged=True, draft=False,
-         body="Reverts pool size increase - caused connection exhaustion",
-         user__login="Diana", user="Diana", base__ref="main", head__label="revert/db-pool-fix",
-         created_at=dt(-12.0), merged_at=dt(-11.5), closed_at=dt(-11.5), updated_at=dt(-11.4),
-         html_url="https://github.com/yunus25jmi1/Incident-Root-Cause-Investigator-Pro/pull/4324",
-         additions=5, deletions=15, changed_files=2, comments=4, commits=1, mergeable_state="clean",
-         owner="yunus25jmi1", repo="Incident-Root-Cause-Investigator-Pro"),
-    dict(number=4325, title="fix: correct nginx config for checkout upstream",
+         body="Adds X-Request-ID and X-Trace-ID to all edge responses for debugging",
+         user__login="Bob", user="Bob",
+         base__ref="main", head__label="feat/tracing-headers",
+         created_at=dt(-72), merged_at=dt(-60), closed_at=dt(-60), updated_at=dt(-60),
+         html_url="https://github.com/acme-corp/cdn-infra/pull/4380",
+         additions=120, deletions=20, changed_files=8, comments=6, commits=3,
+         mergeable_state="clean",
+         owner="acme-corp", repo="cdn-infra"),
+    dict(number=4379, title="fix: handle SSL cert rotation for cdn-origin pool",
          state="merged", merged=True, draft=False,
-         body="Fixes proxy_pass directive that was pointing to old deployment",
-         user__login="Alice", user="Alice", base__ref="main", head__label="fix/nginx-checkout-config",
-         created_at=dt(-16.0), merged_at=dt(-8.5), closed_at=dt(-8.5), updated_at=dt(-8.4),
-         html_url="https://github.com/yunus25jmi1/Incident-Root-Cause-Investigator-Pro/pull/4325",
-         additions=8, deletions=4, changed_files=1, comments=6, commits=2, mergeable_state="clean",
-         owner="yunus25jmi1", repo="Incident-Root-Cause-Investigator-Pro"),
-    dict(number=4326, title="feat: add circuit breaker pattern for payment calls",
-         state="merged", merged=True, draft=False,
-         body="Implements circuit breaker with 50% failure threshold",
-         user__login="Bob", user="Bob", base__ref="main", head__label="feat/circuit-breaker",
-         created_at=dt(-72.0), merged_at=dt(-60.0), closed_at=dt(-60.0), updated_at=dt(-59.9),
-         html_url="https://github.com/yunus25jmi1/Incident-Root-Cause-Investigator-Pro/pull/4326",
-         additions=120, deletions=30, changed_files=8, comments=12, commits=5, mergeable_state="clean",
-         owner="yunus25jmi1", repo="Incident-Root-Cause-Investigator-Pro"),
-    dict(number=4327, title="chore: upgrade redis client to v4.5.0",
-         state="merged", merged=True, draft=False,
-         body="Updates redis-py from 3.5.3 to 4.5.0 for connection stability fixes",
-         user__login="Charlie", user="Charlie", base__ref="main", head__label="chore/redis-upgrade",
-         created_at=dt(-20.0), merged_at=dt(-10.0), closed_at=dt(-10.0), updated_at=dt(-9.9),
-         html_url="https://github.com/yunus25jmi1/Incident-Root-Cause-Investigator-Pro/pull/4327",
-         additions=25, deletions=25, changed_files=3, comments=2, commits=1, mergeable_state="clean",
-         owner="yunus25jmi1", repo="Incident-Root-Cause-Investigator-Pro"),
-    dict(number=4328, title="fix: handle SSL certificate rotation for payment webhook",
-         state="merged", merged=True, draft=False,
-         body="Updates cert store and adds cert expiry monitoring",
-         user__login="Diana", user="Diana", base__ref="main", head__label="fix/ssl-rotation",
-         created_at=dt(-100.0), merged_at=dt(-96.0), closed_at=dt(-96.0), updated_at=dt(-95.9),
-         html_url="https://github.com/yunus25jmi1/Incident-Root-Cause-Investigator-Pro/pull/4328",
-         additions=60, deletions=10, changed_files=4, comments=7, commits=3, mergeable_state="clean",
-         owner="yunus25jmi1", repo="Incident-Root-Cause-Investigator-Pro"),
-    dict(number=4329, title="WIP: migrate checkout to new pricing engine",
-         state="open", merged=False, draft=True,
-         body="Work in progress - migrating pricing logic to microservice",
-         user__login="Alice", user="Alice", base__ref="main", head__label="feat/new-pricing-engine",
-         created_at=dt(-6.0), merged_at=None, closed_at=None, updated_at=dt(-2.0),
-         html_url="https://github.com/yunus25jmi1/Incident-Root-Cause-Investigator-Pro/pull/4329",
-         additions=450, deletions=200, changed_files=25, comments=3, commits=8, mergeable_state="dirty",
-         owner="yunus25jmi1", repo="Incident-Root-Cause-Investigator-Pro"),
-    dict(number=4330, title="fix: add retry logic for shipping API calls",
+         body="Updates CA bundle and adds cert expiry monitoring to origin health checks",
+         user__login="Diana", user="Diana",
+         base__ref="main", head__label="fix/ssl-origin-rotation",
+         created_at=dt(-96), merged_at=dt(-84), closed_at=dt(-84), updated_at=dt(-84),
+         html_url="https://github.com/acme-corp/cdn-infra/pull/4379",
+         additions=45, deletions=8, changed_files=3, comments=4, commits=2,
+         mergeable_state="clean",
+         owner="acme-corp", repo="cdn-infra"),
+    dict(number=4383, title="fix: add canary deployment step for cache config changes",
          state="open", merged=False, draft=False,
-         body="Implements exponential backoff retry for third-party shipping API",
-         user__login="Bob", user="Bob", base__ref="main", head__label="fix/shipping-retry",
-         created_at=dt(-4.0), merged_at=None, closed_at=None, updated_at=dt(-1.0),
-         html_url="https://github.com/yunus25jmi1/Incident-Root-Cause-Investigator-Pro/pull/4330",
-         additions=35, deletions=5, changed_files=2, comments=1, commits=2, mergeable_state="clean",
-         owner="yunus25jmi1", repo="Incident-Root-Cause-Investigator-Pro"),
-    dict(number=4331, title="feat: add request tracing headers to all services",
+         body="Prevents future incidents by requiring a 5-minute canary window for all "
+              "CDN config changes. Postmortem action item from INC-804.",
+         user__login="Alice", user="Alice",
+         base__ref="main", head__label="fix/canary-deploy",
+         created_at=dt_min(120), merged_at=None, closed_at=None, updated_at=dt_min(60),
+         html_url="https://github.com/acme-corp/cdn-infra/pull/4383",
+         additions=55, deletions=10, changed_files=3, comments=8, commits=3,
+         mergeable_state="clean",
+         owner="acme-corp", repo="cdn-infra"),
+    dict(number=4384, title="feat: add automated cache-hit-ratio canary check to deploy pipeline",
          state="open", merged=False, draft=False,
-         body="Adds X-Request-ID and X-Trace-ID headers for distributed tracing",
-         user__login="Charlie", user="Charlie", base__ref="main", head__label="feat/tracing-headers",
-         created_at=dt(-8.0), merged_at=None, closed_at=None, updated_at=dt(-3.0),
-         html_url="https://github.com/yunus25jmi1/Incident-Root-Cause-Investigator-Pro/pull/4331",
-         additions=200, deletions=0, changed_files=15, comments=5, commits=6, mergeable_state="clean",
-         owner="yunus25jmi1", repo="Incident-Root-Cause-Investigator-Pro"),
+         body="Checks that cache hit ratio doesn't drop below 50% within 2 minutes of deploy. "
+              "If it does, auto-rollback. Postmortem action item from INC-804.",
+         user__login="Charlie", user="Charlie",
+         base__ref="main", head__label="feat/cache-ratio-canary",
+         created_at=dt_min(130), merged_at=None, closed_at=None, updated_at=dt_min(65),
+         html_url="https://github.com/acme-corp/cdn-infra/pull/4384",
+         additions=120, deletions=5, changed_files=6, comments=3, commits=4,
+         mergeable_state="clean",
+         owner="acme-corp", repo="cdn-infra"),
 ]
 
 # ── PagerDuty Incidents ──────────────────────────────────────────────
 PD_INCIDENTS = [
-    dict(id="INC789", title="Checkout service errors spike - SEV-2",
-         status="triggered", urgency="high", created_at=dt(-36.3), escalation_level=1,
-         escalation_policy_id="EP001"),
-    dict(id="INC790", title="Database connection pool exhaustion - SEV-3",
-         status="triggered", urgency="medium", created_at=dt(-12.3), escalation_level=1,
-         escalation_policy_id="EP002"),
-    dict(id="INC791", title="Deployment config drift - HTTP 502 errors",
-         status="triggered", urgency="high", created_at=dt(-8.3), escalation_level=2,
-         escalation_policy_id="EP003"),
-    dict(id="INC792", title="Payment gateway latency spike - SEV-3",
-         status="acknowledged", urgency="medium", created_at=dt(-48.0), escalation_level=1,
-         escalation_policy_id="EP001"),
-    dict(id="INC793", title="Redis cluster node failure",
-         status="triggered", urgency="high", created_at=dt(-10.0), escalation_level=1,
-         escalation_policy_id="EP002"),
-    dict(id="INC794", title="Kubernetes pod crash loop on payment-service",
-         status="triggered", urgency="high", created_at=dt(-7.0), escalation_level=2,
-         escalation_policy_id="EP003"),
-    dict(id="INC795", title="Shipping rate API degradation",
-         status="acknowledged", urgency="medium", created_at=dt(-14.0), escalation_level=1,
-         escalation_policy_id="EP001"),
-    dict(id="INC796", title="Memory leak on checkout containers",
-         status="triggered", urgency="medium", created_at=dt(-20.0), escalation_level=1,
-         escalation_policy_id="EP002"),
-    dict(id="INC797", title="PostgreSQL replication lag exceeds threshold",
-         status="triggered", urgency="high", created_at=dt(-3.0), escalation_level=1,
-         escalation_policy_id="EP003"),
-    dict(id="INC798", title="SSL certificate expiry warning",
-         status="resolved", urgency="low", created_at=dt(-96.0), escalation_level=1,
-         escalation_policy_id="EP001"),
-    dict(id="INC799", title="Inventory sync failure",
-         status="resolved", urgency="low", created_at=dt(-72.0), escalation_level=1,
-         escalation_policy_id="EP002"),
-    dict(id="INC800", title="CDN cache purge failure",
-         status="resolved", urgency="low", created_at=dt(-120.0), escalation_level=1,
-         escalation_policy_id="EP003"),
-    dict(id="INC801", title="Docker registry pull rate limit hit",
-         status="resolved", urgency="low", created_at=dt(-168.0), escalation_level=1,
-         escalation_policy_id="EP001"),
-    dict(id="INC802", title="Elasticsearch cluster yellow status",
-         status="acknowledged", urgency="low", created_at=dt(-4.0), escalation_level=1,
-         escalation_policy_id="EP002"),
-    dict(id="INC803", title="Order processing backlog growing",
-         status="triggered", urgency="medium", created_at=dt(-6.0), escalation_level=1,
-         escalation_policy_id="EP003"),
+    dict(id="INC-804", title="CRITICAL: CDN 502 error storm — all POPs affected",
+         status="triggered", urgency="high",
+         created_at=dt_min(4), escalation_level=1,
+         escalation_policy_id="EP-CDN"),
+    dict(id="INC-804-ack", title="CRITICAL: CDN 502 error storm — all POPs affected",
+         status="acknowledged", urgency="high",
+         created_at=dt_min(5), escalation_level=1,
+         escalation_policy_id="EP-CDN"),
+    dict(id="INC-804-resolved", title="CRITICAL: CDN 502 error storm — all POPs affected",
+         status="resolved", urgency="high",
+         created_at=dt_min(48), escalation_level=1,
+         escalation_policy_id="EP-CDN"),
+    dict(id="INC-805", title="Origin pool connection exhaustion — checkout-service",
+         status="triggered", urgency="high",
+         created_at=dt_min(4), escalation_level=1,
+         escalation_policy_id="EP-ORIGIN"),
+    dict(id="INC-805-resolved", title="Origin pool connection exhaustion — checkout-service",
+         status="resolved", urgency="high",
+         created_at=dt_min(46), escalation_level=1,
+         escalation_policy_id="EP-ORIGIN"),
+    dict(id="INC-806", title="Cache hit ratio anomaly: 92% → 0.3%",
+         status="triggered", urgency="medium",
+         created_at=dt_min(5), escalation_level=1,
+         escalation_policy_id="EP-CDN"),
+    dict(id="INC-806-resolved", title="Cache hit ratio anomaly: 92% → 0.3%",
+         status="resolved", urgency="medium",
+         created_at=dt_min(47), escalation_level=1,
+         escalation_policy_id="EP-CDN"),
+    dict(id="INC-801", title="SSL certificate expiry on api-gateway",
+         status="resolved", urgency="medium",
+         created_at=dt(-168), escalation_level=1,
+         escalation_policy_id="EP-ORIGIN"),
+    dict(id="INC-802", title="Docker registry pull rate limit on cdn-deploy",
+         status="resolved", urgency="low",
+         created_at=dt(-336), escalation_level=1,
+         escalation_policy_id="EP-CDN"),
+    dict(id="INC-803", title="Elasticsearch cluster yellow status on cdn-logs",
+         status="resolved", urgency="low",
+         created_at=dt(-72), escalation_level=1,
+         escalation_policy_id="EP-CDN"),
 ]
 
 PD_ONCALLS = [
-    dict(id="oncall-001", escalation_policy_id="EP001", escalation_level=1,
-         name="Bob Smith", email="bob@company.com"),
-    dict(id="oncall-002", escalation_policy_id="EP001", escalation_level=2,
-         name="Alice", email="alice@company.com"),
-    dict(id="oncall-003", escalation_policy_id="EP002", escalation_level=1,
-         name="Diana Chen", email="diana@company.com"),
-    dict(id="oncall-004", escalation_policy_id="EP002", escalation_level=2,
-         name="Charlie", email="charlie@company.com"),
-    dict(id="oncall-005", escalation_policy_id="EP003", escalation_level=1,
-         name="Frank Miller", email="frank@company.com"),
-    dict(id="oncall-006", escalation_policy_id="EP003", escalation_level=2,
-         name="Bob Smith", email="bob@company.com"),
+    dict(id="oncall-cdn-1", escalation_policy_id="EP-CDN", escalation_level=1,
+         name="Charlie", email="charlie@acme-corp.com"),
+    dict(id="oncall-cdn-2", escalation_policy_id="EP-CDN", escalation_level=2,
+         name="Diana Chen", email="diana@acme-corp.com"),
+    dict(id="oncall-origin-1", escalation_policy_id="EP-ORIGIN", escalation_level=1,
+         name="Alice", email="alice@acme-corp.com"),
+    dict(id="oncall-origin-2", escalation_policy_id="EP-ORIGIN", escalation_level=2,
+         name="Bob Smith", email="bob@acme-corp.com"),
 ]
 
 # ── Slack Messages ───────────────────────────────────────────────────
 SLACK_MESSAGES = [
-    dict(user_id="U06M7PADT29", text="<@U0B6Z6LMJ80> what caused the 5xx spike?",
-         ts=dt(-36.0), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p1", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U0B6Z6LMJ80", text="Looking into it now. Seeing errors in checkout-service. <@U06M7PADT29>",
-         ts=dt(-35.9), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p2", reply_count=2, thread_ts=None, subtype=None),
-    dict(user_id="U0B68GEFG3K", text="I noticed PR #4321 was merged about 30 min before the spike started",
-         ts=dt(-35.8), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p3", reply_count=3, thread_ts=None, subtype=None),
-    dict(user_id="U06M7PADT29", text="Can someone revert PR #4321?",
-         ts=dt(-35.5), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p4", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U0B6Z6LMJ80", text="Revert PR is up: #4324. Also the DB pool fix from earlier seems related.",
-         ts=dt(-35.0), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p5", reply_count=5, thread_ts=None, subtype=None),
-    dict(user_id="U0B68GEFG3K", text="Database connection pool is completely exhausted. Running query to check active connections.",
-         ts=dt(-12.4), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p6", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U06M7PADT29", text="PagerDuty INC790 triggered for DB pool. Who's on call?",
-         ts=dt(-12.3), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p7", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U0B6Z6LMJ80", text="Diana is on call for DB issues. I'll escalate to her.",
-         ts=dt(-12.2), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p8", reply_count=4, thread_ts=None, subtype=None),
-    dict(user_id="U0B68GEFG3K", text="Reverting the pool size increase fixed the immediate issue. Monitoring now.",
-         ts=dt(-11.5), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p9", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U06M7PADT29", text="We're getting 502 errors on checkout now! <@U0B6Z6LMJ80>",
-         ts=dt(-8.5), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p10", reply_count=3, thread_ts=None, subtype=None),
-    dict(user_id="U0B6Z6LMJ80", text="Likely config drift from the deploy. Check nginx config on the new instances.",
-         ts=dt(-8.4), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p11", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U0B68GEFG3K", text="Found it. The new deployment didn't pick up the updated nginx config. Fix in #4325.",
-         ts=dt(-8.3), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p12", reply_count=2, thread_ts=None, subtype=None),
-    dict(user_id="U06M7PADT29", text="Good catch. Let's make sure config sync is automated for next time.",
-         ts=dt(-8.0), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p13", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U0B6Z6LMJ80", text="I'll create a postmortem ticket for this. Three incidents in three days is too many.",
-         ts=dt(-7.5), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p14", reply_count=5, thread_ts=None, subtype=None),
-    dict(user_id="U06M7PADT29", text="Alert: Redis node in cluster-us-east-1a is down. <@U0B6Z6LMJ80>",
-         ts=dt(-10.0), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p15", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U0B6Z6LMJ80", text="Seeing payment failures. Is the circuit breaker working?",
-         ts=dt(-9.5), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p16", reply_count=3, thread_ts=None, subtype=None),
-    dict(user_id="U0B68GEFG3K", text="Pod crash loop in payment-service. OOMKilled. <@U06M7PADT29>",
-         ts=dt(-7.0), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p17", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U0B6Z6LMJ80", text="Memory leak seems to be getting worse. Let's increase memory limits temporarily.",
-         ts=dt(-6.5), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p18", reply_count=2, thread_ts=None, subtype=None),
-    dict(user_id="U06M7PADT29", text="Has anyone reviewed the shipping API degradation? Customers complaining about slow checkout.",
-         ts=dt(-14.0), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p19", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U0B68GEFG3K", text="Shipping API is timing out. Their SLA says 2s response but we're seeing 15s+",
-         ts=dt(-13.5), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p20", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U0B6Z6LMJ80", text="Opened PR #4330 with retry logic for shipping API. ETA 30 min.",
-         ts=dt(-4.0), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p21", reply_count=1, thread_ts=None, subtype=None),
-    dict(user_id="U06M7PADT29", text="PostgreSQL replication lag is at 15s. Need to investigate. <@U0B68GEFG3K>",
-         ts=dt(-3.0), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p22", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U0B68GEFG3K", text="Looking at replica lag now. The write volume doubled in the last hour.",
-         ts=dt(-2.5), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p23", reply_count=0, thread_ts=None, subtype=None),
-    dict(user_id="U0B6Z6LMJ80", text="Postmortem for INC789, INC790, INC791 scheduled for tomorrow 10am.",
-         ts=dt(-1.0), channel="C0B68EU1909",
-         permalink="https://slack.com/archives/C0B68EU1909/p24", reply_count=0, thread_ts=None, subtype=None),
+    # Incident breakout — 02:04 UTC
+    dict(user_id="U01CDN", text="<!channel> :red_circle: CDN 502 error rate just spiked to 8.4%. "
+                                "PagerDuty INC-804 triggered. Check CDN-ALERTS channel.",
+         ts=dt_min(4), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p1",
+         reply_count=12, thread_ts=None, subtype="bot_message"),
+
+    dict(user_id="U02CHARLIE", text="<@U02CHARLIE> you're on-call for CDN. INC-804 is high urgency.",
+         ts=dt_min(4.5), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p2",
+         reply_count=0, thread_ts=None, subtype="bot_message"),
+
+    dict(user_id="U02CHARLIE", text="Acknowledging INC-804. Looking at Sentry now.",
+         ts=dt_min(5), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p3",
+         reply_count=3, thread_ts=None, subtype=None),
+
+    dict(user_id="U02CHARLIE", text="Sentinel shows CacheKeyMismatchError on all POPs. "
+                                    "Cache hit ratio dropped from 92% to 0.3%. Checking recent deploys.",
+         ts=dt_min(5.5), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p4",
+         reply_count=0, thread_ts=None, subtype=None),
+
+    # Root cause found — 02:06 UTC
+    dict(user_id="U03ALICE", text="PR #4381 was deployed at 02:00 UTC. Cache key normalization for tiered distribution.",
+         ts=dt_min(6), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p5",
+         reply_count=5, thread_ts=None, subtype=None),
+
+    dict(user_id="U02CHARLIE", text="That's it. The cache key change skips normalization for authenticated requests. "
+                                    "They're all bypassing cache and hitting origin. Opening revert now.",
+         ts=dt_min(6.5), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p6",
+         reply_count=0, thread_ts=None, subtype=None),
+
+    dict(user_id="U03ALICE", text="Revert PR #4382 is up. Need two approvals. <@U02CHARLIE> <@U05DIANA>",
+         ts=dt_min(6.8), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p7",
+         reply_count=0, thread_ts=None, subtype=None),
+
+    dict(user_id="U02CHARLIE", text="Approved and merged. Cache purge starting now.",
+         ts=dt_min(7), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p8",
+         reply_count=2, thread_ts=None, subtype=None),
+
+    dict(user_id="U05DIANA", text="Cache purge initiated on all POPs. ETA ~30s for invalidation.",
+         ts=dt_min(10), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p9",
+         reply_count=0, thread_ts=None, subtype=None),
+
+    # Recovery — 02:47 UTC
+    dict(user_id="U02CHARLIE", text="Error rate dropping. Now at 2.1% and falling. Cache hit ratio recovering: 67%.",
+         ts=dt_min(30), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p10",
+         reply_count=0, thread_ts=None, subtype=None),
+
+    dict(user_id="U02CHARLIE", text="Error rate back to baseline (0.12%). Resolving INC-804 and INC-805.",
+         ts=dt_min(47), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p11",
+         reply_count=8, thread_ts=None, subtype=None),
+
+    dict(user_id="U01CDN", text=":large_green_circle: CDN 502 error rate normalized. "
+                                "Total impact: 47 minutes. ~32k users affected. "
+                                "Postmortem scheduled tomorrow 10am.",
+         ts=dt_min(48), channel="C0INCIDENTS",
+         permalink="https://acme-corp.slack.com/archives/C0INCIDENTS/p12",
+         reply_count=0, thread_ts=None, subtype="bot_message"),
+
+    # Postmortem planning — 03:00 UTC
+    dict(user_id="U02CHARLIE", text="Root cause: PR #4381 introduced a cache key normalization bug. "
+                                    "Authenticated requests were not normalized → always missed cache → "
+                                    "origin pool overwhelmed → 502 errors cascade.\n\n"
+                                    "Key issues: 1) No canary deployment for config changes 2) No automated "
+                                    "cache hit ratio check 3) Review missed the edge case.\n\n"
+                                    "Postmortem action items drafted as PR #4383 and #4384.",
+         ts=dt_min(60), channel="C0POSTMORTEMS",
+         permalink="https://acme-corp.slack.com/archives/C0POSTMORTEMS/p1",
+         reply_count=0, thread_ts=None, subtype=None),
+
+    dict(user_id="U03ALICE", text="Agreed on all points. I'll own the canary deployment PR. "
+                                   "The cache key logic needs better test coverage too.",
+         ts=dt_min(62), channel="C0POSTMORTEMS",
+         permalink="https://acme-corp.slack.com/archives/C0POSTMORTEMS/p2",
+         reply_count=3, thread_ts=None, subtype=None),
+
+    dict(user_id="U05DIANA", text="Adding monitoring: we need a dashboard for cache hit ratio per-POP "
+                                   "with PagerDuty integration under 50%.",
+         ts=dt_min(65), channel="C0POSTMORTEMS",
+         permalink="https://acme-corp.slack.com/archives/C0POSTMORTEMS/p3",
+         reply_count=0, thread_ts=None, subtype=None),
+
+    dict(user_id="U04BOB", text="Great analysis. Let's also add an automated rollback trigger when "
+                                 "502 rate exceeds 2% within 3 minutes of any CDN deploy.",
+         ts=dt_min(70), channel="C0POSTMORTEMS",
+         permalink="https://acme-corp.slack.com/archives/C0POSTMORTEMS/p4",
+         reply_count=2, thread_ts=None, subtype=None),
 ]
 
 # ── Source YAML manifests ─────────────────────────────────────────────
+SENTRY_COLS = [
+    {"name": "id", "type": "Utf8", "nullable": False},
+    {"name": "short_id", "type": "Utf8"},
+    {"name": "title", "type": "Utf8"},
+    {"name": "status", "type": "Utf8"},
+    {"name": "level", "type": "Utf8"},
+    {"name": "count", "type": "Int64"},
+    {"name": "user_count", "type": "Int64"},
+    {"name": "first_seen", "type": "Utf8"},
+    {"name": "last_seen", "type": "Utf8"},
+    {"name": "project", "type": "Utf8"},
+    {"name": "query", "type": "Utf8"},
+]
+GITHUB_COLS = [
+    {"name": "number", "type": "Int64", "nullable": False},
+    {"name": "title", "type": "Utf8"},
+    {"name": "state", "type": "Utf8"},
+    {"name": "merged", "type": "Boolean"},
+    {"name": "draft", "type": "Boolean"},
+    {"name": "body", "type": "Utf8"},
+    {"name": "user__login", "type": "Utf8"},
+    {"name": "user", "type": "Utf8"},
+    {"name": "base__ref", "type": "Utf8"},
+    {"name": "head__label", "type": "Utf8"},
+    {"name": "created_at", "type": "Utf8"},
+    {"name": "merged_at", "type": "Utf8"},
+    {"name": "closed_at", "type": "Utf8"},
+    {"name": "updated_at", "type": "Utf8"},
+    {"name": "html_url", "type": "Utf8"},
+    {"name": "additions", "type": "Int64"},
+    {"name": "deletions", "type": "Int64"},
+    {"name": "changed_files", "type": "Int64"},
+    {"name": "comments", "type": "Int64"},
+    {"name": "commits", "type": "Int64"},
+    {"name": "mergeable_state", "type": "Utf8"},
+    {"name": "owner", "type": "Utf8"},
+    {"name": "repo", "type": "Utf8"},
+]
+SLACK_COLS = [
+    {"name": "user_id", "type": "Utf8"},
+    {"name": "text", "type": "Utf8"},
+    {"name": "ts", "type": "Utf8"},
+    {"name": "channel", "type": "Utf8"},
+    {"name": "permalink", "type": "Utf8"},
+    {"name": "reply_count", "type": "Int64"},
+    {"name": "thread_ts", "type": "Utf8"},
+    {"name": "subtype", "type": "Utf8"},
+]
+
+
 def _make_yaml(name: str, table: str, description: str, location: str,
                columns: list[dict]) -> str:
     cols = "\n".join(
-        f"      - {{name: {c['name']}, type: {c['type']}, nullable: {str(c.get('nullable', True)).lower()}}}"
+        f"      - {{name: {c['name']}, type: {c['type']}, "
+        f"nullable: {str(c.get('nullable', True)).lower()}}}"
         for c in columns
     )
     return f"""\
@@ -487,63 +489,14 @@ def generate_all(output_dir: str = BASE_DIR) -> None:
     abs_dir = os.path.abspath(output_dir)
     file_prefix = f"file://{abs_dir}"
 
-    sentry_cols = [
-        {"name": "id", "type": "Utf8", "nullable": False},
-        {"name": "short_id", "type": "Utf8"},
-        {"name": "title", "type": "Utf8"},
-        {"name": "status", "type": "Utf8"},
-        {"name": "level", "type": "Utf8"},
-        {"name": "count", "type": "Int64"},
-        {"name": "user_count", "type": "Int64"},
-        {"name": "first_seen", "type": "Utf8"},
-        {"name": "last_seen", "type": "Utf8"},
-        {"name": "project", "type": "Utf8"},
-        {"name": "query", "type": "Utf8"},
-    ]
-    github_cols = [
-        {"name": "number", "type": "Int64", "nullable": False},
-        {"name": "title", "type": "Utf8"},
-        {"name": "state", "type": "Utf8"},
-        {"name": "merged", "type": "Boolean"},
-        {"name": "draft", "type": "Boolean"},
-        {"name": "body", "type": "Utf8"},
-        {"name": "user__login", "type": "Utf8"},
-        {"name": "user", "type": "Utf8"},
-        {"name": "base__ref", "type": "Utf8"},
-        {"name": "head__label", "type": "Utf8"},
-        {"name": "created_at", "type": "Utf8"},
-        {"name": "merged_at", "type": "Utf8"},
-        {"name": "closed_at", "type": "Utf8"},
-        {"name": "updated_at", "type": "Utf8"},
-        {"name": "html_url", "type": "Utf8"},
-        {"name": "additions", "type": "Int64"},
-        {"name": "deletions", "type": "Int64"},
-        {"name": "changed_files", "type": "Int64"},
-        {"name": "comments", "type": "Int64"},
-        {"name": "commits", "type": "Int64"},
-        {"name": "mergeable_state", "type": "Utf8"},
-        {"name": "owner", "type": "Utf8"},
-        {"name": "repo", "type": "Utf8"},
-    ]
-    slack_cols = [
-        {"name": "user_id", "type": "Utf8"},
-        {"name": "text", "type": "Utf8"},
-        {"name": "ts", "type": "Utf8"},
-        {"name": "channel", "type": "Utf8"},
-        {"name": "permalink", "type": "Utf8"},
-        {"name": "reply_count", "type": "Int64"},
-        {"name": "thread_ts", "type": "Utf8"},
-        {"name": "subtype", "type": "Utf8"},
-    ]
-
     # Sentry
     sentry_dir = os.path.join(abs_dir, "sentry")
     ensure_dir(sentry_dir)
     write_jsonl(os.path.join(sentry_dir, "issues.jsonl"), SENTRY_ISSUES)
     write_yaml(os.path.join(abs_dir, "sentry.yaml"),
                _make_yaml("mock_sentry", "issues",
-                          "Mock Sentry error groups for incident investigation demo",
-                          f"file://{sentry_dir}", sentry_cols))
+                          "Mock Sentry error groups",
+                          f"file://{sentry_dir}", SENTRY_COLS))
 
     # Datadog
     datadog_dir = os.path.join(abs_dir, "datadog")
@@ -556,8 +509,8 @@ def generate_all(output_dir: str = BASE_DIR) -> None:
     write_jsonl(os.path.join(github_dir, "pulls.jsonl"), GITHUB_PULLS)
     write_yaml(os.path.join(abs_dir, "github.yaml"),
                _make_yaml("mock_github", "pulls",
-                          "Mock GitHub pull requests for incident investigation demo",
-                          f"file://{github_dir}", github_cols))
+                          "Mock GitHub pull requests",
+                          f"file://{github_dir}", GITHUB_COLS))
 
     # PagerDuty
     pagerduty_dir = os.path.join(abs_dir, "pagerduty")
@@ -571,23 +524,21 @@ def generate_all(output_dir: str = BASE_DIR) -> None:
     write_jsonl(os.path.join(slack_dir, "messages.jsonl"), SLACK_MESSAGES)
     write_yaml(os.path.join(abs_dir, "slack.yaml"),
                _make_yaml("mock_slack", "messages",
-                          "Mock Slack messages for incident investigation demo",
-                          f"file://{slack_dir}", slack_cols))
+                          "Mock Slack messages",
+                          f"file://{slack_dir}", SLACK_COLS))
 
     logger.info("=" * 60)
-    logger.info("All mock data generated in: %s", output_dir)
-    logger.info("  sentry  : %d issues", len(SENTRY_ISSUES))
-    logger.info("  datadog : %d incidents", len(DATADOG_INCIDENTS))
-    logger.info("  github  : %d pull requests", len(GITHUB_PULLS))
-    logger.info("  pagerduty: %d incidents, %d oncalls", len(PD_INCIDENTS), len(PD_ONCALLS))
-    logger.info("  slack   : %d messages", len(SLACK_MESSAGES))
+    logger.info("Realistic incident mock data generated in: %s", output_dir)
+    logger.info("Incident: CDN Cache Key config drift (inspired by Cloudflare + Fastly outages)")
+    logger.info("  sentry  : %d issues (spike → recovery)", len(SENTRY_ISSUES))
+    logger.info("  datadog : %d incidents (auto-detected alerts)", len(DATADOG_INCIDENTS))
+    logger.info("  github  : %d pull requests (cause + revert + fixes)", len(GITHUB_PULLS))
+    logger.info("  pagerduty: %d incidents + %d oncalls", len(PD_INCIDENTS), len(PD_ONCALLS))
+    logger.info("  slack   : %d messages (incident response + postmortem)", len(SLACK_MESSAGES))
     logger.info("=" * 60)
 
 
 def activate_sources(output_dir: str = BASE_DIR) -> None:
-    """Copy JSONL files to the default names Coral expects, add sources."""
-    import subprocess
-
     coral_cmd = os.environ.get("CORAL_COMMAND", "coral")
 
     sources = [
@@ -610,7 +561,6 @@ def activate_sources(output_dir: str = BASE_DIR) -> None:
             else:
                 logger.warning("Failed to add source '%s': %s", name, stderr)
 
-    # Test connectivity
     for name, _ in sources:
         result = subprocess.run(
             [coral_cmd, "source", "test", name],
@@ -626,10 +576,9 @@ def activate_sources(output_dir: str = BASE_DIR) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate comprehensive mock data for all incident sources"
+        description="Generate realistic incident mock data"
     )
-    parser.add_argument("--output", type=str, default=BASE_DIR,
-                        help="Output directory (default: sources/mocks/)")
+    parser.add_argument("--output", type=str, default=BASE_DIR)
     parser.add_argument("--activate", action="store_true",
                         help="Also add/register mock sources with Coral")
     return parser.parse_args()

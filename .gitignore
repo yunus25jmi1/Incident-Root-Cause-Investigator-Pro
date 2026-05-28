@@ -13,6 +13,7 @@ build/
 
 # Runtime data
 investigator/data/reports/
+investigator/data/queue_state.jsonl
 
 # Agent & Spec Kit
 .opencode/
