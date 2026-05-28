@@ -1,6 +1,9 @@
 import asyncio
+import json
 import logging
 from asyncio import Queue
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from investigator.agent.coral_client import CoralClient
@@ -16,6 +19,76 @@ from investigator.bot.formatter import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_QUEUE_SIZE = 10
+QUEUE_STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "queue_state.jsonl"
+
+
+class QueuePersistence:
+    def __init__(self, path: Path = QUEUE_STATE_PATH):
+        self._path = path
+
+    def save(self, item: tuple) -> None:
+        question, channel, thread_ts, since, service = item
+        entry = {
+            "question": question,
+            "channel": channel,
+            "thread_ts": thread_ts,
+            "since": since,
+            "service": service,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "pending",
+        }
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self._path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            logger.warning("Failed to save queue state: %s", e)
+
+    def remove(self, item: tuple) -> None:
+        question, channel, thread_ts, since, service = item
+        try:
+            if not self._path.exists():
+                return
+            lines = self._path.read_text().splitlines()
+            kept = []
+            for line in lines:
+                try:
+                    entry = json.loads(line)
+                    if (entry.get("question") == question
+                            and entry.get("channel") == channel
+                            and entry.get("thread_ts") == thread_ts):
+                        continue
+                    kept.append(line)
+                except json.JSONDecodeError:
+                    continue
+            self._path.write_text("\n".join(kept) + "\n" if kept else "")
+        except Exception as e:
+            logger.warning("Failed to remove queue state: %s", e)
+
+    @classmethod
+    def load(cls, path: Path = QUEUE_STATE_PATH) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+        entries = []
+        try:
+            for line in path.read_text().splitlines():
+                if line.strip():
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            logger.warning("Failed to load queue state: %s", e)
+            return []
+        return entries
+
+    @classmethod
+    def clear(cls, path: Path = QUEUE_STATE_PATH) -> None:
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception as e:
+            logger.warning("Failed to clear queue state: %s", e)
 
 
 class InvestigationQueue:
@@ -24,12 +97,15 @@ class InvestigationQueue:
         slack_client,
         incidents_channel: str = "incidents",
         max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
+        persistence: Optional[QueuePersistence] = None,
     ):
         self._queue: Queue = Queue(maxsize=max_queue_size)
         self._worker_task: asyncio.Task | None = None
         self._client = slack_client
         self._incidents_channel = incidents_channel
         self._processed_count = 0
+        self._persistence = persistence or QueuePersistence()
+        self._current_item: Optional[tuple] = None
 
     @property
     def processed_count(self) -> int:
@@ -50,7 +126,9 @@ class InvestigationQueue:
                 text="Queue is full. Please wait for the current investigation to complete.",
             )
             return
-        await self._queue.put((question, channel, thread_ts, since, service))
+        item = (question, channel, thread_ts, since, service)
+        await self._queue.put(item)
+        self._persistence.save(item)
         if self._worker_task is None:
             self._worker_task = asyncio.create_task(self._run())
             logger.info("Investigation worker started")
@@ -58,14 +136,16 @@ class InvestigationQueue:
     async def _run(self):
         while True:
             try:
-                item = await self._queue.get()
-                question, channel, thread_ts, since, service = item
+                self._current_item = await self._queue.get()
+                question, channel, thread_ts, since, service = self._current_item
                 await self._process(question, channel, thread_ts, since=since, service=service)
+                self._current_item = None
             except asyncio.CancelledError:
                 logger.info("Investigation worker cancelled")
                 break
             except Exception as e:
                 logger.exception("Investigation worker error: %s", e)
+                self._current_item = None
 
     async def _process(
         self, question: str, channel: str, thread_ts: str,
@@ -131,6 +211,8 @@ class InvestigationQueue:
                 text="🚨 Incident Analysis Report",
                 blocks=blocks,
             )
+            if self._current_item:
+                self._persistence.remove(self._current_item)
             logger.info("Investigation complete for channel=%s", channel)
             self._processed_count += 1
 

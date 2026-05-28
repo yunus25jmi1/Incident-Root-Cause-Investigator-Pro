@@ -4,6 +4,7 @@ import re
 import json
 import logging
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -16,7 +17,7 @@ else:
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-from investigator.bot.queue import InvestigationQueue
+from investigator.bot.queue import InvestigationQueue, QueuePersistence
 from investigator.bot.formatter import (
     postmortem_report,
     error_message,
@@ -182,6 +183,20 @@ async def main():
         incidents_channel=INCIDENTS_CHANNEL,
         max_queue_size=MAX_QUEUE_SIZE,
     )
+
+    saved_entries = QueuePersistence.load()
+    if saved_entries:
+        logger.info("Restoring %d saved queue entries", len(saved_entries))
+        for entry in saved_entries:
+            if entry.get("status") == "pending":
+                await investigation_queue.enqueue(
+                    entry["question"],
+                    entry["channel"],
+                    entry.get("thread_ts", ""),
+                    since=entry.get("since", ""),
+                    service=entry.get("service", ""),
+                )
+        QueuePersistence.clear()
 
     logger.info("Starting Investigator Pro bot (Socket Mode)...")
     handler = AsyncSocketModeHandler(app, SLACK_APP_TOKEN)

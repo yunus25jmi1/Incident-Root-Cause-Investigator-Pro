@@ -1,7 +1,9 @@
 import logging
 import os
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
@@ -13,7 +15,7 @@ if _env_path.exists():
 else:
     load_dotenv()
 
-from investigator.agent.coral_client import CoralClient, CoralError
+from investigator.agent.coral_client import CoralClient, CoralError, QueryErrorCode
 from investigator.agent.reasoning import ReasoningEngine
 
 _GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "").strip()
@@ -21,6 +23,55 @@ _GITHUB_REPO = os.environ.get("GITHUB_REPO", "").strip()
 _USE_MOCK = os.environ.get("USE_MOCK_SOURCES", "true").strip().lower() == "true"
 
 logger = logging.getLogger(__name__)
+
+
+class SourceStatus(Enum):
+    OK = "ok"
+    DEGRADED = "degraded"
+    FAILED = "failed"
+
+
+@dataclass
+class SourceHealth:
+    source_name: str
+    status: SourceStatus = SourceStatus.OK
+    error_count: int = 0
+    last_error: Optional[str] = None
+    last_error_code: Optional[str] = None
+    retries_used: int = 0
+    fallback_used: bool = False
+
+    def record_success(self):
+        self.status = SourceStatus.OK
+
+    def record_error(self, error: CoralError):
+        self.error_count += 1
+        self.last_error = str(error)[:500]
+        self.last_error_code = error.code.value if hasattr(error.code, 'value') else str(error.code)
+        if self.error_count >= 3 or error.code in (
+            QueryErrorCode.SOURCE_NOT_FOUND,
+            QueryErrorCode.TABLE_NOT_FOUND,
+        ):
+            self.status = SourceStatus.FAILED
+        else:
+            self.status = SourceStatus.DEGRADED
+
+    def record_retry(self):
+        self.retries_used += 1
+
+    def record_fallback(self):
+        self.fallback_used = True
+        self.status = SourceStatus.DEGRADED
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "count": 0,
+            "error": self.last_error,
+            "error_code": self.last_error_code,
+            "retries": self.retries_used,
+            "fallback": self.fallback_used,
+        }
 
 
 _INTERNAL_PATTERNS = [
@@ -103,6 +154,8 @@ class AgentCore:
         self._iteration_count = 0
         self._max_loops = 2
         self._reasoning: Optional[ReasoningEngine] = None
+        self._source_health: dict[str, SourceHealth] = {}
+        self._phase2_health: dict[str, int] = {"total_queries": 0, "failed_queries": 0, "retries_used": 0, "fallbacks_used": 0}
 
     async def investigate(self, question: str) -> dict[str, Any]:
         phase1_data = await self._run_phase1()
@@ -156,6 +209,7 @@ class AgentCore:
         if llm_result.get("suggested_actions"):
             base["suggested_actions"] = llm_result["suggested_actions"]
         base["phase2_run"] = True
+        base["phase2_health"] = dict(self._phase2_health)
         return base
 
     @staticmethod
@@ -192,7 +246,10 @@ class AgentCore:
             "pagerduty_incidents": self._source("pagerduty.incidents"),
             "slack_messages": self._source("slack.messages"),
         }
+        self._source_health: dict[str, SourceHealth] = {}
         for source_name, template in self.PHASE1_QUERY_TEMPLATES.items():
+            health = SourceHealth(source_name=source_name)
+            self._source_health[source_name] = health
             since_val = parsed_since or self.PHASE1_SINCE_DEFAULTS.get(source_name, "")
             query = (
                 template
@@ -207,6 +264,7 @@ class AgentCore:
             )
             try:
                 result = await self._coral.query(query)
+                health.record_success()
                 data[source_name] = {
                     "rows": result.rows,
                     "row_count": result.row_count,
@@ -218,6 +276,7 @@ class AgentCore:
                     result.row_count,
                 )
             except CoralError as e:
+                health.record_error(e)
                 logger.warning("Phase 1 [%s] failed: %s", source_name, e)
                 err_msg = str(e)[:500] if not _is_internal_error(str(e)) else "Internal Coral error"
                 data[source_name] = {
@@ -225,9 +284,10 @@ class AgentCore:
                     "row_count": 0,
                     "columns": [],
                     "error": err_msg,
-                    "error_code": e.code.value if hasattr(e.code, 'value') else str(e.code),
+                    "error_code": health.last_error_code,
                 }
             except Exception as e:
+                health.record_error(CoralError(str(e), QueryErrorCode.UNKNOWN))
                 logger.error("Phase 1 [%s] unexpected error: %s", source_name, e)
                 data[source_name] = {
                     "rows": [],
@@ -246,6 +306,14 @@ class AgentCore:
         github = phase1.get("github_pull_requests", {})
         pagerduty = phase1.get("pagerduty_incidents", {})
         slack_msgs = phase1.get("slack_messages", {})
+
+        health_map = {
+            "sentry": self._source_health.get("sentry_issues"),
+            "datadog": self._source_health.get("datadog_incidents"),
+            "github": self._source_health.get("github_pull_requests"),
+            "pagerduty": self._source_health.get("pagerduty_incidents"),
+            "slack": self._source_health.get("slack_messages"),
+        }
 
         sentry_rows = sentry.get("rows", [])
         datadog_rows = datadog.get("rows", [])
@@ -313,15 +381,31 @@ class AgentCore:
             ),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "sources": {
-                "sentry": {"status": "ok" if sentry_rows else "empty", "count": len(sentry_rows)},
-                "datadog": {"status": "ok" if datadog_rows else "empty", "count": len(datadog_rows)},
-                "github": {"status": "ok" if github_rows else "empty", "count": len(github_rows)},
-                "pagerduty": {"status": "ok" if pagerduty_rows else "empty", "count": len(pagerduty_rows)},
-                "slack": {"status": "ok" if slack_rows else "empty", "count": len(slack_rows)},
+                "sentry": self._build_source_dict(health_map["sentry"], sentry_rows),
+                "datadog": self._build_source_dict(health_map["datadog"], datadog_rows),
+                "github": self._build_source_dict(health_map["github"], github_rows),
+                "pagerduty": self._build_source_dict(health_map["pagerduty"], pagerduty_rows),
+                "slack": self._build_source_dict(health_map["slack"], slack_rows),
             },
             "errors": {
                 s: d.get("error") for s, d in phase1.items() if "error" in d
             },
+            "phase2_health": dict(self._phase2_health),
+        }
+
+    @staticmethod
+    def _build_source_dict(health: Optional[SourceHealth], rows: list) -> dict[str, Any]:
+        if health:
+            base = health.to_dict()
+            base["count"] = len(rows)
+            return base
+        return {
+            "status": "ok" if rows else "empty",
+            "count": len(rows),
+            "error": None,
+            "error_code": None,
+            "retries": 0,
+            "fallback": False,
         }
 
     @staticmethod

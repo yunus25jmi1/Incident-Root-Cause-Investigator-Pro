@@ -3,15 +3,49 @@ import os
 import re
 import asyncio
 import logging
+import random
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, TypeVar
 from contextlib import AsyncExitStack
+
+T = TypeVar("T")
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 logger = logging.getLogger(__name__)
+
+
+def retry_with_backoff(
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 8.0,
+    jitter: float = 0.5,
+) -> callable:
+    def decorator(func: callable) -> callable:
+        async def wrapper(*args, **kwargs) -> Any:
+            last_exc = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except CoralError as e:
+                    if not is_transient_error(e):
+                        raise
+                    if attempt >= max_retries:
+                        raise
+                    delay = min(base_delay * (2 ** attempt), max_delay)
+                    delay += random.uniform(-jitter * delay, jitter * delay)
+                    delay = max(0.1, delay)
+                    logger.info("Retry %d/%d for %s after %.2fs: %s",
+                                attempt + 1, max_retries, func.__name__, delay, e)
+                    await asyncio.sleep(delay)
+                    last_exc = e
+                except Exception as e:
+                    raise
+            raise last_exc
+        return wrapper
+    return decorator
 
 
 class QueryErrorCode(Enum):
@@ -32,6 +66,18 @@ class CoralError(Exception):
         self.code = code
         self.details = details or {}
         super().__init__(message)
+
+
+TRANSIENT_CODES = {
+    QueryErrorCode.TIMEOUT,
+    QueryErrorCode.CONNECTION_FAILED,
+    QueryErrorCode.MALFORMED_RESPONSE,
+    QueryErrorCode.UNKNOWN,
+}
+
+
+def is_transient_error(error: CoralError) -> bool:
+    return error.code in TRANSIENT_CODES
 
 
 class ReadOnlyValidator:

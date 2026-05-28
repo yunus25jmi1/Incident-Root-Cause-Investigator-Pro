@@ -508,7 +508,7 @@ class TestAnalyzeWithLoop:
             )
 
         assert len(phase2_results_holder) == 1
-        assert phase2_results_holder[0]["error"] == "query failed"
+        assert phase2_results_holder[0]["error"] == "Query failed after retries"
 
     @pytest.mark.asyncio
     async def test_loop_stops_when_no_follow_up(self):

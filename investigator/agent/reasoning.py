@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -185,8 +186,11 @@ class ReasoningEngine:
         max_loops: int = 2,
         incidents_channel: str = "incidents",
         on_phase2_start: Optional[callable] = None,
+        retry_budget: int = 2,
+        max_consecutive_failures: int = 3,
     ) -> dict[str, Any]:
         phase2_results: list[dict[str, Any]] = []
+        consecutive_failures = 0
         for iteration in range(max_loops):
             result = await self.analyze(question, phase1_data, phase2_results)
             follow_up_sql = result.get("follow_up_sql", [])
@@ -199,20 +203,36 @@ class ReasoningEngine:
 
             for sql in follow_up_sql:
                 filled = sql.replace("{{INCIDENTS_CHANNEL}}", incidents_channel)
-                try:
-                    qr = await coral_query_fn(filled)
+                success = False
+                for attempt in range(retry_budget + 1):
+                    try:
+                        qr = await coral_query_fn(filled)
+                        phase2_results.append({
+                            "sql": filled[:200],
+                            "rows": qr.rows,
+                            "row_count": qr.row_count,
+                        })
+                        logger.info("Phase 2 SQL (%d rows): %s", qr.row_count, filled[:100])
+                        success = True
+                        break
+                    except Exception as e:
+                        logger.warning("Phase 2 SQL failed (attempt %d/%d): %s — %s",
+                                       attempt + 1, retry_budget + 1, filled[:100], e)
+                        if attempt < retry_budget:
+                            await asyncio.sleep(1.0)
+                if not success:
                     phase2_results.append({
                         "sql": filled[:200],
-                        "rows": qr.rows,
-                        "row_count": qr.row_count,
+                        "error": "Query failed after retries",
                     })
-                    logger.info("Phase 2 SQL (%d rows): %s", qr.row_count, filled[:100])
-                except Exception as e:
-                    logger.warning("Phase 2 SQL failed: %s — %s", filled[:100], e)
-                    phase2_results.append({
-                        "sql": filled[:200],
-                        "error": str(e),
-                    })
+                    consecutive_failures += 1
+                else:
+                    consecutive_failures = 0
+
+                if consecutive_failures >= max_consecutive_failures:
+                    logger.warning("Phase 2: %d consecutive failures, exiting loop",
+                                   consecutive_failures)
+                    break
 
         return await self.analyze(question, phase1_data, phase2_results)
 
