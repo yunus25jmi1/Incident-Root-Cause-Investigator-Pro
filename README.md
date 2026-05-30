@@ -12,6 +12,10 @@ A Slack-native AI agent that automates incident root‑cause investigation by jo
 - **`/postmortem --incident INC789`** — generate a post-incident review from a saved investigation
 - **`--since 3h` / `--service checkout`** — narrow time windows and services
 - **Agent loop** — the LLM can request follow-up SQL queries when it needs more data
+- **Predictive risk projection** — anticipates service degradation, cascade failures, and connection pool exhaustion
+- **Parallel universe simulator** — models "what if" rollback scenarios with recovery timelines
+- **Temporal replay scrubber** — step through the incident timeline in the web UI
+- **Cascading failure graph** — visual dependency chain of error propagation across sources
 - **Comprehensive mock data** — 30-44 realistic records per source covering 3+ incident storylines
 
 ## Architecture
@@ -80,6 +84,8 @@ make run
 | `USE_MOCK_SOURCES` | No | Set to `true` to query mock sources instead of live APIs (default: `true`) |
 | `SENTRY_DSN` | Optional | Sentry DSN for seed-sentry |
 | `CORAL_COMMAND` | No | Coral binary path (default: `coral`) |
+| `API_KEY` | No | API key for web endpoint auth (Bearer token) |
+| `QUEUE_ENCRYPTION_KEY` | No | Fernet key for queue state encryption at rest |
 
 ### Mock Data
 
@@ -109,7 +115,7 @@ python -m pytest investigator/tests/ -v
 make test-coverage
 ```
 
-**234 tests** (3 skipped — require real Coral running).
+**281 tests** (3 skipped — require real Coral running).
 
 ## Project Structure
 
@@ -121,15 +127,22 @@ investigator/
 │   └── reasoning.py        # ReasoningEngine — intent classification, Phase 2 loop
 ├── bot/
 │   ├── handler.py          # Slack Bolt handler (app_mention, /postmortem)
-│   ├── queue.py            # InvestigationQueue — serial async worker
+│   ├── queue.py            # InvestigationQueue — serial async worker + encryption
 │   └── formatter.py        # Block‑Kit builders for Slack messages
+├── lib/
+│   ├── rate_limiter.py     # Per-user sliding window rate limiter
+│   └── sanitizer.py        # ErrorSanitizer — path/token/env-var redaction
+├── web/
+│   ├── app.py              # FastAPI server with SSE streaming + API key auth
+│   ├── templates/index.html # Dark-theme UI with replay + simulation views
+│   └── static/style.css
 ├── scripts/
 │   ├── generate_mock.py    # Legacy JSONL mock generator (3 scenarios)
 │   ├── seed_all.py         # Comprehensive mock data for all 5 sources
 │   └── seed_sentry.py      # Push test errors to Sentry
 ├── sources/mocks/
 │   ├── {datadog,pagerduty,sentry,github,slack}.yaml  # Coral source specs
-│   ├── {datadog,pagerduty,sentry,github,slack}/       # Generated JSONL data
+│   └── {datadog,pagerduty,sentry,github,slack}/       # Generated JSONL data
 └── tests/
     ├── test_coral_client.py   # 89 tests — MCP client, ReadOnlyValidator, edge cases
     ├── test_reasoning.py      # 30+ tests — intent, Phase 2 loop, error paths
@@ -137,8 +150,28 @@ investigator/
     ├── test_integration.py    # 40+ tests — AgentCore, evidence chain, multi-scenario
     ├── test_queue.py          # 11 tests — concurrency, cancellation, error resilience
     ├── test_e2e.py            # 14 tests — mock-based end-to-end flows
-    └── test_setup.py          # 20 tests — setup integrity, imports, mock generation
+    ├── test_setup.py          # 20 tests — setup integrity, imports, mock generation
+    ├── test_rate_limiter.py   # Rate limiter concurrency tests
+    └── test_sanitizer.py      # ErrorSanitizer redaction + truncation tests
 ```
+
+## Security
+
+| Layer | Mechanism |
+|---|---|
+| SQL injection | Parameterized queries (`$service` placeholder); `ReadOnlyValidator` rejects non-SELECT/WITH; `_sanitize_service()` strips to `[a-zA-Z0-9_.-]` |
+| API authentication | Optional `Bearer` token via `API_KEY` env var on all `/api/*` endpoints |
+| Rate limiting | Per-user sliding window (Slack) + per-IP (web), configurable limits |
+| Error sanitization | Regex redaction of paths, tokens, env vars before Slack output |
+| LLM output | HTML/script tags stripped before persisting reports to disk |
+| Queue state | Optional Fernet encryption at rest via `QUEUE_ENCRYPTION_KEY` |
+| Command injection | `CORAL_COMMAND` resolved to absolute path; `shutil.which()` validates existence |
+| XSS prevention | `textContent`-based HTML escaping in web UI; allowlist validation for types/priorities |
+| Docker | Runs as `appuser` (non-root); seed scripts execute under restricted user |
+| Request size | 10 KB body cap via middleware on all web endpoints |
+| Dependencies | Pinned exact versions in `requirements.txt`; no `>=` ranges |
+
+**Security audit** — all 9 findings from the initial review are resolved. See commit `8aaa45e`.
 
 ## Key Design Decisions
 
@@ -147,6 +180,7 @@ investigator/
 - **Phase 1 + Phase 2** — Phase 1 runs 5 parallel SQL queries (one per source). Phase 2 lets the LLM request additional SQL based on findings.
 - **SQL is read-only** — validated by `ReadOnlyValidator` before every query.
 - **Reports are local JSON** — stored in `investigator/data/reports/` for the `/postmortem` command.
+- **Sentry** — error reporting via `sentry_sdk.init()` in both web app and bot lifespans, gated on `SENTRY_DSN`.
 
 ## Demo
 
