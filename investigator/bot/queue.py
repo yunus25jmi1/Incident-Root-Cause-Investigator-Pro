@@ -7,9 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from slack_sdk.errors import SlackApiError
+
 from investigator.agent.coral_client import CoralClient
 from investigator.agent.core import AgentCore
+from investigator.lib.secrets_refresher import SecretsRefresher
 from investigator.agent.reasoning import ReasoningEngine
+from investigator.lib.redis_persistence import RedisQueuePersistence
 from investigator.bot.formatter import (
     investigation_report,
     error_message,
@@ -73,6 +77,9 @@ class QueuePersistence:
         except Exception as e:
             logger.warning("Failed to save queue state: %s", e)
 
+    async def async_save(self, item: tuple) -> None:
+        self.save(item)
+
     def remove(self, item: tuple) -> None:
         question, channel, thread_ts, since, service = item
         try:
@@ -97,6 +104,9 @@ class QueuePersistence:
             self._path.write_bytes(b"\n".join(kept) + b"\n" if kept else b"")
         except Exception as e:
             logger.warning("Failed to remove queue state: %s", e)
+
+    async def async_remove(self, item: tuple) -> None:
+        self.remove(item)
 
     @classmethod
     def load(cls, path: Path = QUEUE_STATE_PATH, encrypter: Optional[QueueEncrypter] = None) -> list[dict[str, Any]]:
@@ -133,14 +143,20 @@ class InvestigationQueue:
         incidents_channel: str = "incidents",
         max_queue_size: int = DEFAULT_MAX_QUEUE_SIZE,
         persistence: Optional[QueuePersistence] = None,
+        coral: Optional[CoralClient] = None,
     ):
         self._queue: Queue = Queue(maxsize=max_queue_size)
         self._worker_task: asyncio.Task | None = None
         self._client = slack_client
         self._incidents_channel = incidents_channel
         self._processed_count = 0
-        self._persistence = persistence or QueuePersistence()
+        if persistence is None:
+            _redis_p = RedisQueuePersistence()
+            self._persistence = _redis_p if _redis_p.is_available() else QueuePersistence()
+        else:
+            self._persistence = persistence
         self._current_item: Optional[tuple] = None
+        self._coral = coral
 
     @property
     def processed_count(self) -> int:
@@ -155,15 +171,18 @@ class InvestigationQueue:
         since: str = "", service: str = "",
     ):
         if self._queue.full():
-            await self._client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                text="Queue is full. Please wait for the current investigation to complete.",
-            )
+            try:
+                await self._client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text="Queue is full. Please wait for the current investigation to complete.",
+                )
+            except Exception as e:
+                logger.warning("Failed to notify channel %s about full queue: %s", channel, e)
             return
         item = (question, channel, thread_ts, since, service)
         await self._queue.put(item)
-        self._persistence.save(item)
+        await self._persistence.async_save(item)
         if self._worker_task is None:
             self._worker_task = asyncio.create_task(self._run())
             logger.info("Investigation worker started")
@@ -188,11 +207,19 @@ class InvestigationQueue:
     ):
         status_ts: str | None = None
         try:
-            result = await self._client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                text=progress_update("🔍", "Investigating..."),
-            )
+            try:
+                result = await self._client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=progress_update("🔍", "Investigating..."),
+                )
+            except SlackApiError as e:
+                if e.response.get("error") == "channel_not_found":
+                    logger.warning("Channel %s not found — removing from queue", channel)
+                    if self._current_item:
+                        await self._persistence.async_remove(self._current_item)
+                    return
+                raise
             status_ts = result.get("ts")
             if not status_ts:
                 status_ts = result["message"]["ts"]
@@ -229,15 +256,37 @@ class InvestigationQueue:
                 )
                 return
 
+            if intent == "lookup":
+                await self._client.chat_update(
+                    channel=channel, ts=status_ts,
+                    text=progress_update("📡", "Fetching data..."),
+                )
+                coral = self._coral if (self._coral and self._coral.is_connected) else await CoralClient().__aenter__()
+                phase1 = await AgentCore.run_phase1_queries(coral, since="24h")
+                answer = await reasoning.lookup_answer(question, phase1, coral.query)
+                await self._client.chat_update(
+                    channel=channel, ts=status_ts,
+                    text=answer,
+                    blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": answer}}],
+                )
+                return
+
             async def on_progress(emoji: str, text: str):
                 await self._update_status(channel, status_ts, progress_update(emoji, text))
 
-            async with CoralClient() as coral:
-                agent = AgentCore(coral, incidents_channel=self._incidents_channel)
-                report = await agent.investigate_with_reasoning(
-                    question, on_progress=on_progress,
-                    since=since, service=service,
-                )
+            await SecretsRefresher().refresh_if_changed()
+
+            if self._coral and self._coral.is_connected:
+                coral = self._coral
+            else:
+                coral_cm = CoralClient()
+                await coral_cm.connect()
+                coral = coral_cm
+            agent = AgentCore(coral, incidents_channel=self._incidents_channel)
+            report = await agent.investigate_with_reasoning(
+                question, on_progress=on_progress,
+                since=since, service=service,
+            )
 
             blocks = investigation_report(report)
             await self._client.chat_update(
@@ -247,16 +296,20 @@ class InvestigationQueue:
                 blocks=blocks,
             )
             if self._current_item:
-                self._persistence.remove(self._current_item)
+                await self._persistence.async_remove(self._current_item)
             logger.info("Investigation complete for channel=%s", channel)
             self._processed_count += 1
 
         except asyncio.TimeoutError:
             error = "Investigation timed out. Coral may be unavailable."
             await self._post_error(channel, thread_ts, status_ts, error)
+            if self._current_item:
+                await self._persistence.async_remove(self._current_item)
         except Exception as e:
             logger.exception("Investigation failed")
             await self._post_error(channel, thread_ts, status_ts, str(e))
+            if self._current_item:
+                await self._persistence.async_remove(self._current_item)
 
     async def _update_status(self, channel: str, ts: str, text: str):
         try:
@@ -279,11 +332,14 @@ class InvestigationQueue:
                 return
             except Exception:
                 logger.warning("Failed to update error status, posting new message")
-        await self._client.chat_postMessage(
-            channel=channel, thread_ts=thread_ts,
-            text="❌ Investigation failed",
-            blocks=blocks,
-        )
+        try:
+            await self._client.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text="❌ Investigation failed",
+                blocks=blocks,
+            )
+        except Exception as e:
+            logger.warning("Failed to post error message to channel %s: %s", channel, e)
 
     async def cancel(self):
         if self._worker_task:

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -225,6 +226,19 @@ class AgentCore:
         return base
 
     @staticmethod
+    async def run_phase1_queries(
+        coral: CoralClient, since: str = "", service: str = "",
+    ) -> dict[str, Any]:
+        """Run all 5 source queries and return phase1 data dict.
+        Useful for lightweight lookups that don't need an AgentCore instance."""
+        agent = AgentCore.__new__(AgentCore)
+        agent._coral = coral
+        agent._incidents_channel = "incidents"
+        agent._source_health = {}
+        agent._phase2_health = {}
+        return await agent._run_phase1(since=since, service=service)
+
+    @staticmethod
     def _sanitize_service(service: str) -> str:
         cleaned = re.sub(r"[^a-zA-Z0-9_.-]", "", service)
         if cleaned != service:
@@ -248,7 +262,6 @@ class AgentCore:
     async def _run_phase1(
         self, since: str = "", service: str = "",
     ) -> dict[str, Any]:
-        data: dict[str, Any] = {}
         parsed_since = self._parse_since(since)
         safe_service = self._sanitize_service(service) if service else ""
         source_table_map = {
@@ -259,15 +272,15 @@ class AgentCore:
             "slack_messages": self._source("slack.messages"),
         }
         self._source_health: dict[str, SourceHealth] = {}
-        for source_name, template in self.PHASE1_QUERY_TEMPLATES.items():
+
+        async def _query_source(source_name: str, template: str) -> tuple[str, dict[str, Any]]:
             health = SourceHealth(source_name=source_name)
             self._source_health[source_name] = health
             since_val = parsed_since or self.PHASE1_SINCE_DEFAULTS.get(source_name, "")
-            query_params: dict[str, str] = {}
             service_filter = ""
             if source_name == "sentry_issues" and safe_service:
-                service_filter = "AND project = $service"
-                query_params["service"] = safe_service
+                escaped = safe_service.replace("'", "''")
+                service_filter = f"AND project = '{escaped}'"
             query = (
                 template
                 .replace("{sentry_issues}", source_table_map["sentry_issues"])
@@ -280,39 +293,36 @@ class AgentCore:
                 .replace("{{SERVICE_FILTER}}", service_filter)
             )
             try:
-                result = await self._coral.query(query, params=query_params if query_params else None)
+                result = await self._coral.query(query)
                 health.record_success()
-                data[source_name] = {
+                logger.info("Phase 1 [%s]: %d rows returned", source_name, result.row_count)
+                return source_name, {
                     "rows": result.rows,
                     "row_count": result.row_count,
                     "columns": result.columns,
                 }
-                logger.info(
-                    "Phase 1 [%s]: %d rows returned",
-                    source_name,
-                    result.row_count,
-                )
             except CoralError as e:
                 health.record_error(e)
                 logger.warning("Phase 1 [%s] failed: %s", source_name, e)
                 err_msg = str(e)[:500] if not _is_internal_error(str(e)) else "Internal Coral error"
-                data[source_name] = {
-                    "rows": [],
-                    "row_count": 0,
-                    "columns": [],
-                    "error": err_msg,
-                    "error_code": health.last_error_code,
+                return source_name, {
+                    "rows": [], "row_count": 0, "columns": [],
+                    "error": err_msg, "error_code": health.last_error_code,
                 }
             except Exception as e:
                 health.record_error(CoralError(str(e), QueryErrorCode.UNKNOWN))
                 logger.error("Phase 1 [%s] unexpected error: %s", source_name, e)
-                data[source_name] = {
-                    "rows": [],
-                    "row_count": 0,
-                    "columns": [],
+                return source_name, {
+                    "rows": [], "row_count": 0, "columns": [],
                     "error": "Unexpected source error",
                 }
-        return data
+
+        tasks = [
+            _query_source(name, tmpl)
+            for name, tmpl in self.PHASE1_QUERY_TEMPLATES.items()
+        ]
+        results = await asyncio.gather(*tasks)
+        return dict(results)
 
     def _build_report(
         self, question: str, phase1: dict[str, Any],

@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import os
+import signal
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -22,12 +24,17 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from investigator.agent.coral_client import CoralClient
 from investigator.agent.core import AgentCore
+from investigator.agent.reasoning import ReasoningEngine
 from investigator.lib.rate_limiter import RateLimiter
+from investigator.lib.secrets_refresher import SecretsRefresher
+from investigator.lib.redis_persistence import RedisRateLimiter
 
 logger = logging.getLogger(__name__)
 
+secrets_refresher = SecretsRefresher()
 coral: Optional[CoralClient] = None
-rate_limiter = RateLimiter(max_requests=20, window_seconds=60.0)
+_redis_rl = RedisRateLimiter(max_requests=20, window_seconds=60.0)
+rate_limiter = _redis_rl if _redis_rl._r else RateLimiter(max_requests=20, window_seconds=60.0)
 _HTML_DIR = os.path.join(os.path.dirname(__file__), "templates")
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -57,7 +64,23 @@ async def lifespan(app: FastAPI):
         logger.info("Coral MCP connected")
     except Exception as e:
         logger.warning("Coral MCP connection failed (mock sources may still work): %s", e)
+
+    _shutdown_event = asyncio.Event()
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(_shutdown()))
+        except NotImplementedError:
+            pass
+
+    async def _shutdown():
+        logger.info("Shutdown signal received — draining...")
+        _shutdown_event.set()
+
     yield
+
+    if _shutdown_event.is_set():
+        logger.info("Graceful shutdown complete")
     if coral and coral.is_connected:
         await coral.disconnect()
         logger.info("Coral MCP disconnected")
@@ -116,13 +139,17 @@ async def investigate(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(verify_api_key),
 ):
     client_ip = request.client.host if request.client else "unknown"
-    if rate_limiter.is_rate_limited(client_ip):
+    if await rate_limiter.is_rate_limited(client_ip):
         raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again in 60 seconds.")
+
+    await secrets_refresher.refresh_if_changed()
 
     safe_service = AgentCore._sanitize_service(service)
 
     if not question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    logger.info("Investigate request from IP=%s: question=%r, service=%r", client_ip, question[:200], safe_service)
 
     if not coral or not coral.is_connected:
         return HTMLResponse(
@@ -132,42 +159,77 @@ async def investigate(
         )
 
     async def event_stream():
-        queue: asyncio.Queue = asyncio.Queue()
+        try:
+            queue: asyncio.Queue = asyncio.Queue()
 
-        async def on_progress(emoji: str, text: str) -> None:
-            await queue.put(("progress", {"emoji": emoji, "text": text}))
+            async def on_progress(emoji: str, text: str) -> None:
+                await queue.put(("progress", {"emoji": emoji, "text": text}))
 
-        async def on_phase2_query(data: dict) -> None:
-            await queue.put(("phase2_query", {
-                "sql": data.get("sql", ""),
-                "row_count": data.get("row_count", 0),
-            }))
+            async def on_phase2_query(data: dict) -> None:
+                await queue.put(("phase2_query", {
+                    "sql": data.get("sql", ""),
+                    "row_count": data.get("row_count", 0),
+                }))
 
-        async def run_investigation():
+            async def run_investigation():
+                try:
+                    reasoning = ReasoningEngine()
+                    intent = await reasoning.classify_intent(question)
+
+                    if intent == "lookup":
+                        phase1 = await AgentCore.run_phase1_queries(coral, since=since, service=safe_service)
+                        answer = await reasoning.lookup_answer(question, phase1, coral.query)
+                        await queue.put(("complete", {
+                            "question": question,
+                            "answer": answer,
+                            "summary": answer,
+                            "sources": {k: {"status": "ok" if v.get("rows") else "empty", "count": len(v.get("rows", []))} for k, v in phase1.items()},
+                            "confidence": "High",
+                            "evidence_chain": [],
+                            "people_involved": [],
+                            "suggested_actions": [],
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "phase2_run": False,
+                        }))
+                        return
+
+                    agent = AgentCore(coral, incidents_channel="incidents")
+                    report = await agent.investigate_with_reasoning(
+                        question=question,
+                        on_progress=on_progress,
+                        on_phase2_query=on_phase2_query,
+                        since=since,
+                        service=safe_service,
+                    )
+                    await queue.put(("complete", report))
+                except asyncio.CancelledError:
+                    logger.info("Investigation cancelled for IP=%s", client_ip)
+                except Exception:
+                    logger.exception("Investigation failed for IP=%s question=%r", client_ip, question[:200])
+                    await queue.put(("error", {"message": "An internal error occurred during investigation."}))
+
+            task = asyncio.create_task(run_investigation())
+
             try:
-                agent = AgentCore(coral, incidents_channel="incidents")
-                report = await agent.investigate_with_reasoning(
-                    question=question,
-                    on_progress=on_progress,
-                    on_phase2_query=on_phase2_query,
-                    since=since,
-                    service=safe_service,
-                )
-                await queue.put(("complete", report))
-            except Exception:
-                logger.exception("Investigation failed for IP=%s question=%r", client_ip, question[:200])
-                await queue.put(("error", {"message": "An internal error occurred during investigation."}))
-
-        task = asyncio.create_task(run_investigation())
-
-        while True:
-            event_type, data = await queue.get()
-            serialized = json.dumps(data, default=str, ensure_ascii=False)
-            yield f"event: {event_type}\ndata: {serialized}\n\n"
-            if event_type in ("complete", "error"):
-                break
-
-        task = None
+                while True:
+                    try:
+                        event_type, data = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if await request.is_disconnected():
+                            task.cancel()
+                            logger.info("Client disconnected — cancelled investigation for IP=%s", client_ip)
+                            break
+                        continue
+                    serialized = json.dumps(data, default=str, ensure_ascii=False)
+                    yield f"event: {event_type}\ndata: {serialized}\n\n"
+                    if event_type in ("complete", "error"):
+                        break
+            finally:
+                if not task.done():
+                    task.cancel()
+        except Exception:
+            logger.exception("SSE generator failed for IP=%s", client_ip)
+            yield f"event: error\ndata: {json.dumps({'message': 'Investigation stream failed. Please try again.'})}\n\n"
 
     return StreamingResponse(
         event_stream(),

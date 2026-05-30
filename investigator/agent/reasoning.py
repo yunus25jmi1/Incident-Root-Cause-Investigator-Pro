@@ -60,7 +60,7 @@ class ReasoningEngine:
         base_url = os.environ.get("OPENAI_BASE_URL", "https://integrate.api.nvidia.com/v1")
         if not api_key:
             raise ValueError("NVIDIA_API_KEY or OPENAI_API_KEY must be set")
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
@@ -68,7 +68,8 @@ class ReasoningEngine:
     async def classify_intent(self, question: str) -> str:
         prompt = (
             'Classify this question into one intent word:\n'
-            '- "investigate" — asking about an incident, error, outage, root cause\n'
+            '- "investigate" — asking about an incident, error, outage, root cause, what caused X, why did X happen\n'
+            '- "lookup" — asking a factual question about who, what, when, where (e.g. who was on-call, what errors are active, who deployed)\n'
             '- "postmortem" — requesting a post-incident review or retrospective\n'
             '- "help" — asking how to use the bot, what it can do\n'
             '- "chat" — general conversation, greetings, off-topic\n\n'
@@ -83,7 +84,7 @@ class ReasoningEngine:
                 temperature=0.0,
             )
             intent = response.choices[0].message.content.strip().lower().rstrip(".")
-            if intent in ("investigate", "postmortem", "help", "chat"):
+            if intent in ("investigate", "lookup", "postmortem", "help", "chat"):
                 return intent
             return "investigate"
         except Exception as e:
@@ -109,6 +110,72 @@ class ReasoningEngine:
         except Exception as e:
             logger.warning("Chat response failed: %s", e)
             return "Hey! I can help investigate incidents. Try asking about a specific error or outage."
+
+    async def lookup_answer(
+        self, question: str, phase1_data: dict[str, Any], coral_query_fn,
+    ) -> str:
+        ctx = self._phase1_context(phase1_data)
+        prompt = (
+            f"## Available Tables\n{get_catalog_description()}\n\n"
+            f"## Question\n{question}\n\n"
+            f"## Current Data\n{ctx}\n\n"
+            "If you need more data to answer, write raw SQL SELECT queries in a JSON array. "
+            "Only query tables listed above. "
+            "Otherwise, answer the question concisely based on the available data.\n\n"
+            'Respond in JSON:\n'
+            '{"answer": "...", "follow_up_sql": ["SELECT ..."]}\n'
+            'Use "I don\'t have enough information to answer that." if the data is insufficient.'
+        )
+        try:
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+                max_tokens=1024,
+                temperature=0.1,
+            )
+            content = response.choices[0].message.content or ""
+            cleaned = content.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[-1]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
+            result = json.loads(cleaned)
+            follow_up = result.get("follow_up_sql", [])
+            if follow_up:
+                for sql in follow_up:
+                    try:
+                        qr = await coral_query_fn(sql)
+                        ctx += f"\n\n## Additional Data\n{json.dumps({'sql': sql[:200], 'rows': qr.rows, 'row_count': qr.row_count}, indent=2, default=str)}"
+                    except Exception as e:
+                        logger.warning("Lookup follow-up SQL failed: %s — %s", sql[:100], e)
+                final_prompt = (
+                    f"## Available Tables\n{get_catalog_description()}\n\n"
+                    f"## Question\n{question}\n\n"
+                    f"## Data\n{ctx}\n\n"
+                    "Answer the question concisely based on the available data. "
+                    'Respond in JSON: {"answer": "..."}\n'
+                    'Use "I don\'t have enough information to answer that." if the data is insufficient.'
+                )
+                response2 = await self._client.chat.completions.create(
+                    model=self._model,
+                    messages=[{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": final_prompt}],
+                    max_tokens=512,
+                    temperature=0.1,
+                )
+                content2 = response2.choices[0].message.content or ""
+                cleaned2 = content2.strip()
+                if cleaned2.startswith("```"):
+                    cleaned2 = cleaned2.split("\n", 1)[-1]
+                    if cleaned2.endswith("```"):
+                        cleaned2 = cleaned2[:-3]
+                    cleaned2 = cleaned2.strip()
+                result2 = json.loads(cleaned2)
+                return result2.get("answer", "I don't have enough information to answer that.")
+            return result.get("answer", "I don't have enough information to answer that.")
+        except Exception as e:
+            logger.warning("Lookup answer failed: %s", e)
+            return f"I couldn't find an answer to that question. Try asking about a specific incident, error, or outage."
 
     @staticmethod
     def _phase1_context(phase1_data: dict[str, Any]) -> str:

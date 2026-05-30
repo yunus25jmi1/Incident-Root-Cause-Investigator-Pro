@@ -3,6 +3,7 @@ import asyncio
 import re
 import json
 import logging
+import signal
 from pathlib import Path
 from typing import Optional
 
@@ -16,9 +17,12 @@ else:
 
 from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from slack_bolt.util.utils import get_boot_message
 
+from investigator.agent.coral_client import CoralClient
 from investigator.bot.queue import InvestigationQueue, QueuePersistence
 from investigator.lib.rate_limiter import RateLimiter
+from investigator.lib.redis_persistence import RedisRateLimiter
 from investigator.lib.sanitizer import ErrorSanitizer
 from investigator.bot.formatter import (
     postmortem_report,
@@ -56,7 +60,8 @@ REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = AsyncApp(token=SLACK_BOT_TOKEN)
 investigation_queue: "InvestigationQueue | None" = None
-rate_limiter = RateLimiter(max_requests=RATE_LIMIT_PER_WINDOW, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
+_redis_rl = RedisRateLimiter(max_requests=RATE_LIMIT_PER_WINDOW, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
+rate_limiter = _redis_rl if _redis_rl._r else RateLimiter(max_requests=RATE_LIMIT_PER_WINDOW, window_seconds=RATE_LIMIT_WINDOW_SECONDS)
 
 
 def is_channel_allowed(channel_id: str) -> bool:
@@ -67,6 +72,10 @@ def is_channel_allowed(channel_id: str) -> bool:
 
 def _sanitize_id(raw: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "", raw)[:128]
+
+
+def _is_valid_channel(channel: str) -> bool:
+    return bool(re.fullmatch(r"C[A-Z0-9]{8,}", channel))
 
 
 def parse_flags(text: str) -> tuple[str, str, str]:
@@ -111,8 +120,8 @@ async def handle_mention(event: dict, say, client):
         )
         return
 
-    if rate_limiter.is_rate_limited(user_id):
-        remaining = rate_limiter.remaining(user_id)
+    if await rate_limiter.is_rate_limited(user_id):
+        remaining = await rate_limiter.remaining(user_id)
         logger.warning("Rate limited user=%s channel=%s", user_id, channel)
         await say(
             text=f"Rate limited. You can send {remaining} more request(s) per 60s.",
@@ -205,30 +214,71 @@ async def main():
             logger.info("Sentry SDK initialized")
         except Exception as e:
             logger.warning("Failed to init Sentry SDK: %s", e)
-    global investigation_queue
-    investigation_queue = InvestigationQueue(
-        app.client,
-        incidents_channel=INCIDENTS_CHANNEL,
-        max_queue_size=MAX_QUEUE_SIZE,
-    )
 
-    saved_entries = QueuePersistence.load()
-    if saved_entries:
-        logger.info("Restoring %d saved queue entries", len(saved_entries))
-        for entry in saved_entries:
-            if entry.get("status") == "pending":
-                await investigation_queue.enqueue(
-                    entry["question"],
-                    entry["channel"],
-                    entry.get("thread_ts", ""),
-                    since=entry.get("since", ""),
-                    service=entry.get("service", ""),
-                )
-        QueuePersistence.clear()
+    coral = CoralClient()
+    try:
+        await coral.connect()
+        logger.info("Coral MCP connected (pre-warmed)")
+    except Exception as e:
+        logger.warning("Coral MCP pre-warm failed (will connect per-investigation): %s", e)
+        coral = None
 
-    logger.info("Starting Investigator Pro bot (Socket Mode)...")
-    handler = AsyncSocketModeHandler(app, SLACK_APP_TOKEN)
-    await handler.start_async()
+    try:
+        global investigation_queue
+        investigation_queue = InvestigationQueue(
+            app.client,
+            incidents_channel=INCIDENTS_CHANNEL,
+            max_queue_size=MAX_QUEUE_SIZE,
+            coral=coral,
+        )
+
+        saved_entries = QueuePersistence.load()
+        if saved_entries:
+            logger.info("Restoring %d saved queue entries", len(saved_entries))
+            for entry in saved_entries:
+                if entry.get("status") != "pending":
+                    continue
+                channel = entry.get("channel", "")
+                if not _is_valid_channel(channel):
+                    logger.warning("Skipping restore entry with invalid channel=%s", channel)
+                    continue
+                try:
+                    await investigation_queue.enqueue(
+                        entry["question"],
+                        channel,
+                        entry.get("thread_ts", ""),
+                        since=entry.get("since", ""),
+                        service=entry.get("service", ""),
+                    )
+                except Exception as e:
+                    logger.warning("Failed to restore queue entry (channel may be dead): %s", e)
+            QueuePersistence.clear()
+
+        loop = asyncio.get_event_loop()
+        shutdown_event = asyncio.Event()
+
+        async def _signal_shutdown():
+            logger.info("Shutdown signal received")
+            if investigation_queue:
+                await investigation_queue.cancel()
+            await handler.close_async()
+            shutdown_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, lambda: asyncio.create_task(_signal_shutdown()))
+            except NotImplementedError:
+                pass
+
+        logger.info("Starting Investigator Pro bot (Socket Mode)...")
+        handler = AsyncSocketModeHandler(app, SLACK_APP_TOKEN)
+        await handler.connect_async()
+        handler.app.logger.info(get_boot_message())
+        await shutdown_event.wait()
+    finally:
+        if coral and coral.is_connected:
+            await coral.disconnect()
+            logger.info("Coral MCP disconnected")
 
 
 if __name__ == "__main__":
