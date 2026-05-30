@@ -58,7 +58,7 @@ async def test_full_investigation_flow():
     """End-to-end: mock Coral → AgentCore → investigation report → valid Slack blocks."""
     mock_coral = AsyncMock(spec=CoralClient)
 
-    async def mock_query(sql: str):
+    async def mock_query(sql: str, **kwargs):
         for key, result in _mock_multi_source_rows().items():
             if key in sql.lower() or key.replace("_", ".") in sql.lower():
                 return result
@@ -98,7 +98,7 @@ async def test_full_flow_via_queue():
     coral.__aenter__ = AsyncMock(return_value=coral)
     coral.__aexit__ = AsyncMock(return_value=None)
 
-    async def mock_query(sql: str):
+    async def mock_query(sql: str, **kwargs):
         for key, result in _mock_multi_source_rows().items():
             if key in sql.lower() or key.replace("_", ".") in sql.lower():
                 return result

@@ -13,10 +13,12 @@ if os.path.exists(_env_path):
 else:
     load_dotenv()
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Depends
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from investigator.agent.coral_client import CoralClient
 from investigator.agent.core import AgentCore
@@ -29,10 +31,26 @@ rate_limiter = RateLimiter(max_requests=20, window_seconds=60.0)
 _HTML_DIR = os.path.join(os.path.dirname(__file__), "templates")
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
+_API_KEY = os.environ.get("API_KEY", "").strip()
+_SECURITY_SCHEME = HTTPBearer(auto_error=False)
+
+async def verify_api_key(credentials: Optional[HTTPAuthorizationCredentials] = Depends(_SECURITY_SCHEME)):
+    if _API_KEY:
+        if not credentials or credentials.credentials != _API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid or missing API key. Provide via Authorization: Bearer <key> or set API_KEY env var.")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global coral
+    _dsn = os.environ.get("SENTRY_DSN", "").strip()
+    if _dsn:
+        try:
+            import sentry_sdk
+            sentry_sdk.init(dsn=_dsn, traces_sample_rate=0.1)
+            logger.info("Sentry SDK initialized")
+        except Exception as e:
+            logger.warning("Failed to init Sentry SDK: %s", e)
     coral = CoralClient()
     try:
         await coral.connect()
@@ -46,6 +64,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Incident Root-Cause Investigator", lifespan=lifespan)
+
+_MAX_REQUEST_BODY = 1024 * 10  # 10 KB
+
+
+class RequestBodySizeMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > _MAX_REQUEST_BODY:
+            raise HTTPException(status_code=413, detail="Request body too large")
+        return await call_next(request)
+
+
+app.add_middleware(RequestBodySizeMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,7 +100,7 @@ async def index():
 
 
 @app.get("/api/health")
-async def health():
+async def health(credentials: Optional[HTTPAuthorizationCredentials] = Depends(verify_api_key)):
     return {
         "status": "ok",
         "coral_connected": coral.is_connected if coral else False,
@@ -82,6 +113,7 @@ async def investigate(
     question: str = Query(..., max_length=5000, description="Investigation question"),
     since: str = Query("3h", max_length=20, description="Time window (e.g. 3h, 30m)"),
     service: str = Query("", max_length=200, description="Service name filter"),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(verify_api_key),
 ):
     client_ip = request.client.host if request.client else "unknown"
     if rate_limiter.is_rate_limited(client_ip):

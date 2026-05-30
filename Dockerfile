@@ -12,16 +12,15 @@ RUN pip install --no-cache-dir coral-ai
 
 COPY . .
 
-RUN mkdir -p investigator/data/reports && \
-    python -m investigator.scripts.seed_all && \
-    rm -rf /root/.cache/pip
-
-ENV USE_MOCK_SOURCES=true
-
 RUN addgroup --system appuser && adduser --system --ingroup appuser appuser && \
     chown -R appuser:appuser /app
 
 USER appuser
+
+RUN mkdir -p investigator/data/reports && \
+    python -m investigator.scripts.seed_all
+
+ENV USE_MOCK_SOURCES=true
 
 EXPOSE 8000
 

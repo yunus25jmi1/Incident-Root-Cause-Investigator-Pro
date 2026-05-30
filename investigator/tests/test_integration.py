@@ -36,6 +36,79 @@ class TestParseSince:
         assert AgentCore._parse_since("") == ""
 
 
+class TestParseFlags:
+    def _parse_flags(self, text):
+        from investigator.bot.handler import parse_flags
+        return parse_flags(text)
+
+    def test_parses_since_flag(self):
+        text, since, service = self._parse_flags("what happened? --since 3h")
+        assert since == "3h"
+        assert "what happened?" in text
+
+    def test_parses_service_flag(self):
+        text, since, service = self._parse_flags("what happened? --service checkout")
+        assert service == "checkout"
+        assert "what happened?" in text
+
+    def test_parses_both_flags(self):
+        text, since, service = self._parse_flags("why 5xx? --since 2h --service api")
+        assert since == "2h"
+        assert service == "api"
+        assert "why 5xx?" in text
+
+    def test_no_flags(self):
+        text, since, service = self._parse_flags("what caused the outage?")
+        assert since == ""
+        assert service == ""
+        assert text == "what caused the outage?"
+
+    def test_service_with_hyphen(self):
+        text, since, service = self._parse_flags("errors --service checkout-service")
+        assert service == "checkout-service"
+        assert "errors" in text
+
+    def test_service_with_dot(self):
+        text, since, service = self._parse_flags("errors --service api.gateway")
+        assert service == "api.gateway"
+        assert "errors" in text
+
+    def test_service_with_path_traversal_stripped(self):
+        text, since, service = self._parse_flags("errors --service ../etc/passwd")
+        assert service == "../etc/passwd"
+        assert "errors" in text
+
+
+class TestSanitizeService:
+    def _sanitize_service(self, val):
+        from investigator.agent.core import AgentCore
+        return AgentCore._sanitize_service(val)
+
+    def test_keeps_alphanumeric_and_dots(self):
+        assert self._sanitize_service("checkout-service") == "checkout-service"
+
+    def test_keeps_underscores(self):
+        assert self._sanitize_service("checkout_service") == "checkout_service"
+
+    def test_strips_path_traversal(self):
+        safe = self._sanitize_service("../etc/passwd")
+        assert "/" not in safe
+        assert "etc" in safe
+
+    def test_strips_tilde(self):
+        assert "~" not in self._sanitize_service("~/checkout")
+
+    def test_strips_spaces(self):
+        assert self._sanitize_service("my service") == "myservice"
+
+    def test_handles_empty(self):
+        assert self._sanitize_service("") == ""
+
+    def test_handles_only_unsafe_chars(self):
+        safe = self._sanitize_service("../../")
+        assert "/" not in safe
+
+
 class TestSanitizeId:
     @staticmethod
     def _sanitize_id(raw: str) -> str:
@@ -131,7 +204,7 @@ class TestAgentCoreIntegration:
     async def test_agent_core_builds_report_from_data(self):
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             if "mock_sentry.issues" in sql:
                 return QueryResult(
                     rows=[{
@@ -203,7 +276,7 @@ class TestAgentCoreIntegration:
     async def test_agent_handles_empty_data_gracefully(self):
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             return QueryResult(rows=[], row_count=0, columns=[])
 
         mock_coral.query = mock_query
@@ -221,7 +294,7 @@ class TestAgentCoreIntegration:
     async def test_agent_handles_partial_source_failures(self):
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             if "sentry" in sql:
                 raise CoralError("API rate limited", QueryErrorCode.UNKNOWN)
             if "datadog" in sql:
@@ -244,7 +317,7 @@ class TestAgentCoreIntegration:
     async def test_agent_persists_report(self):
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             return QueryResult(rows=[], row_count=0, columns=[])
 
         mock_coral.query = mock_query
@@ -262,7 +335,7 @@ class TestEvidenceChain:
     async def test_evidence_chain_includes_slack_messages(self):
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             if "mock_sentry.issues" in sql:
                 return QueryResult(rows=[{
                     "id": "1", "title": "Error spike", "level": "error",
@@ -305,7 +378,7 @@ class TestEvidenceChain:
     async def test_evidence_chain_capped(self):
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             if "slack.messages" in sql:
                 return QueryResult(rows=[
                     {"user_id": f"U{i:03d}", "text": f"Message {i}", "ts": f"1621877700.000{i:03d}"}
@@ -326,7 +399,7 @@ class TestEvidenceChain:
     async def test_evidence_chain_ordering(self):
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             if "mock_github.pulls" in sql:
                 return QueryResult(rows=[{
                     "title": "feat: new endpoint",
@@ -360,7 +433,7 @@ class TestEvidenceChain:
     async def test_evidence_chain_missing_url(self):
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             if "mock_sentry.issues" in sql:
                 return QueryResult(rows=[{
                     "id": "1", "title": "NPE in checkout",
@@ -382,7 +455,7 @@ class TestEvidenceChain:
     async def test_evidence_chain_string_items(self):
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             return QueryResult(rows=[], row_count=0, columns=[])
 
         mock_coral.query = mock_query
@@ -397,7 +470,7 @@ class TestEvidenceChain:
     async def test_evidence_chain_includes_deploy_then_errors(self):
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             if "mock_github.pulls" in sql:
                 return QueryResult(rows=[{
                     "title": "fix: checkout null check",
@@ -585,6 +658,137 @@ class TestFormatterIntegration:
         assert "🔍 Investigating..." in steps[0]
         assert "📡" in steps[1]
         assert "✅ Complete" in steps[2]
+
+    def test_report_with_predictions(self):
+        report = {
+            "predictions": [
+                {
+                    "title": "Database saturation risk",
+                    "description": "High probability of saturation within 5 minutes",
+                    "timeframe": "3-5 minutes",
+                    "severity": "critical",
+                    "confidence": 0.85,
+                },
+                {
+                    "title": "Cascading authorization failure",
+                    "description": "Auth service likely to degrade",
+                    "timeframe": "5-8 minutes",
+                    "severity": "high",
+                    "confidence": 0.72,
+                },
+            ],
+            "summary": "Test summary",
+            "evidence_chain": [],
+            "people_involved": [],
+            "suggested_actions": [],
+            "sources": {},
+            "errors": {},
+            "confidence": "Medium",
+            "timestamp": "2026-05-26T12:00:00Z",
+        }
+        blocks = investigation_report(report)
+        all_text = str(blocks)
+        assert "Predictions" in all_text
+        assert "Database saturation" in all_text
+        assert "Cascading authorization" in all_text
+        assert "85%" in all_text
+
+    def test_report_with_simulation(self):
+        report = {
+            "simulation": {
+                "scenario": "Rollback of PR: fix/checkout-validation",
+                "trigger": "PR by Alice reverted",
+                "confidence": 0.75,
+                "outcome": "Recovered",
+                "timeline": [
+                    {"time": "T+0m", "event": "Rollback initiated", "status": "pending"},
+                    {"time": "T+6m", "event": "Error rate dropping", "status": "recovering"},
+                    {"time": "T+10m", "event": "Full recovery", "status": "healthy"},
+                ],
+                "side_effects": ["Brief increase in 4xx responses"],
+            },
+            "summary": "Test summary",
+            "evidence_chain": [],
+            "people_involved": [],
+            "suggested_actions": [],
+            "sources": {},
+            "errors": {},
+            "confidence": "Medium",
+            "timestamp": "2026-05-26T12:00:00Z",
+        }
+        blocks = investigation_report(report)
+        all_text = str(blocks)
+        assert "Parallel Universe" in all_text
+        assert "Rollback of PR" in all_text
+        assert "75%" in all_text
+        assert "Recovered" in all_text
+
+
+class TestPredictions:
+    from investigator.agent.core import AgentCore
+
+    def test_generates_critical_prediction_for_high_errors_with_sev2(self):
+        sentry_rows = [{"count": 847, "title": "ZeroDivisionError"}]
+        datadog_rows = [{"severity": "SEV-2", "title": "Error rate breach"}]
+        pagerduty_rows = []
+        predictions = self.AgentCore._generate_predictions(sentry_rows, datadog_rows, pagerduty_rows)
+        titles = [p["title"] for p in predictions]
+        assert "Database saturation risk" in titles
+        assert "Cascading authorization failure" in titles
+
+    def test_generates_escalation_prediction_for_moderate_errors(self):
+        sentry_rows = [{"count": 250, "title": "TimeoutError"}]
+        datadog_rows = [{"severity": "SEV-3", "title": "Latency breach"}]
+        pagerduty_rows = []
+        predictions = self.AgentCore._generate_predictions(sentry_rows, datadog_rows, pagerduty_rows)
+        assert any("escalation" in p["type"] for p in predictions)
+
+    def test_generates_stable_prediction_for_low_errors(self):
+        sentry_rows = [{"count": 5, "title": "Minor warning"}]
+        datadog_rows = []
+        pagerduty_rows = []
+        predictions = self.AgentCore._generate_predictions(sentry_rows, datadog_rows, pagerduty_rows)
+        assert any(p["type"] == "stable" for p in predictions)
+
+    def test_empty_data_returns_stable(self):
+        predictions = self.AgentCore._generate_predictions([], [], [])
+        assert len(predictions) == 0
+
+    def test_database_connection_errors_trigger_pool_prediction(self):
+        sentry_rows = [{"count": 150, "title": "database connection timeout"}]
+        datadog_rows = [{"severity": "SEV-3", "title": "DB latency"}]
+        pagerduty_rows = []
+        predictions = self.AgentCore._generate_predictions(sentry_rows, datadog_rows, pagerduty_rows)
+        assert any("Connection pool" in p["title"] or "pool" in p["type"] for p in predictions)
+
+
+class TestSimulation:
+    from investigator.agent.core import AgentCore
+
+    def test_generates_simulation_with_github_data(self):
+        github_rows = [{"title": "fix/checkout-validation", "user__login": "Alice"}]
+        sentry_rows = [{"count": 847, "title": "ZeroDivisionError"}]
+        sim = self.AgentCore._generate_simulation(github_rows, sentry_rows)
+        assert sim is not None
+        assert sim["scenario"] == "Rollback of PR: fix/checkout-validation"
+        assert sim["outcome"] == "Recovered"
+        assert len(sim["timeline"]) >= 4
+
+    def test_no_simulation_without_github(self):
+        sim = self.AgentCore._generate_simulation([], [])
+        assert sim is None
+
+    def test_no_simulation_with_empty_pr(self):
+        github_rows = [{"title": "", "user__login": ""}]
+        sim = self.AgentCore._generate_simulation(github_rows, [])
+        assert sim is None
+
+    def test_simulation_includes_side_effects(self):
+        github_rows = [{"title": "fix/checkout-validation", "user__login": "Alice"}]
+        sentry_rows = [{"count": 500, "title": "Error"}]
+        sim = self.AgentCore._generate_simulation(github_rows, sentry_rows)
+        assert sim["side_effects"] is not None
+        assert len(sim["side_effects"]) > 0
 
 
 @pytest.mark.skip(reason="Requires running Coral with mock sources configured")

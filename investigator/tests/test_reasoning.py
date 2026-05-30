@@ -342,7 +342,7 @@ class TestAnalyzeWithLoop:
         with patch.object(engine, "analyze", mock_analyze):
             mock_coral = AsyncMock()
 
-            async def mock_query(sql: str):
+            async def mock_query(sql: str, **kwargs):
                 from investigator.agent.coral_client import QueryResult
                 return QueryResult(
                     rows=[{"id": "1", "title": "NPE"}],
@@ -377,7 +377,7 @@ class TestAnalyzeWithLoop:
 
         mock_coral = AsyncMock()
 
-        async def mock_query(sql):
+        async def mock_query(sql, **kwargs):
             from investigator.agent.coral_client import QueryResult
             return QueryResult(rows=[], row_count=0, columns=[])
 
@@ -421,7 +421,7 @@ class TestAnalyzeWithLoop:
 
         mock_coral = AsyncMock()
 
-        async def mock_query(sql):
+        async def mock_query(sql, **kwargs):
             from investigator.agent.coral_client import QueryResult
             phase2_started = True
             return QueryResult(rows=[], row_count=0, columns=[])
@@ -558,7 +558,7 @@ class TestAgentCoreReasoning:
 
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             return QueryResult(rows=[], row_count=0, columns=[])
 
         mock_coral.query = mock_query
@@ -593,7 +593,7 @@ class TestAgentCoreReasoning:
 
         mock_coral = AsyncMock(spec=CoralClient)
 
-        async def mock_query(sql: str):
+        async def mock_query(sql: str, **kwargs):
             return QueryResult(rows=[], row_count=0, columns=[])
 
         mock_coral.query = mock_query

@@ -130,6 +130,38 @@ def investigation_report(report: dict[str, Any]) -> list[dict[str, Any]]:
             "text": {"type": "mrkdwn", "text": _truncate(_sanitize_mrkdwn(actions_text))},
         })
 
+    predictions = report.get("predictions", [])
+    if predictions:
+        pred_text = "*🔮 Predictions*\n"
+        for p in predictions[:4]:
+            if isinstance(p, dict):
+                sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}
+                icon = sev_icon.get(p.get("severity", ""), "⚪")
+                conf = int((p.get("confidence", 0) or 0) * 100)
+                pred_text += f"{icon} *{_sanitize_mrkdwn(p.get('title', ''))}* — {conf}% confidence, {p.get('timeframe', '')}\n{_sanitize_mrkdwn(p.get('description', ''))}\n"
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": _truncate(pred_text)},
+        })
+
+    simulation = report.get("simulation")
+    if simulation:
+        sim_text = (
+            f"*🎮 Parallel Universe Simulation*\n"
+            f"• *Scenario:* {_sanitize_mrkdwn(simulation.get('scenario', ''))}\n"
+            f"• *Confidence:* {int((simulation.get('confidence', 0) or 0) * 100)}%\n"
+            f"• *Outcome:* ✅ {simulation.get('outcome', '')}\n"
+        )
+        timeline = simulation.get("timeline", [])
+        if timeline:
+            sim_text += "*Recovery Timeline:*\n"
+            for s in timeline[:4]:
+                sim_text += f"  `{s.get('time', '')}` {_sanitize_mrkdwn(s.get('event', ''))}\n"
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": _truncate(sim_text)},
+        })
+
     source_counts = report.get("sources", {})
     if source_counts:
         sources_text = "*🔌 Sources*\n"

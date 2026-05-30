@@ -221,13 +221,21 @@ class CoralClient:
                 "Already connected to Coral MCP",
                 QueryErrorCode.ALREADY_CONNECTED,
             )
-        if self._command != "coral" and not shutil.which(self._command):
+        resolved = shutil.which(self._command)
+        if not resolved:
             raise CoralError(
-                f"Coral command not found or invalid: {self._command}. "
+                f"Coral command not found: {self._command}. "
                 f"Ensure Coral is installed and CORAL_COMMAND is a valid path.",
                 QueryErrorCode.CONNECTION_FAILED,
                 {"command": self._command},
             )
+        if not os.path.isabs(resolved) and self._command != "coral":
+            logger.warning(
+                "CORAL_COMMAND=%r resolved to %r which is not an absolute path. "
+                "Set CORAL_COMMAND to an absolute path to prevent PATH hijacking.",
+                self._command, resolved,
+            )
+        self._command = resolved
         self._exit_stack = AsyncExitStack()
         try:
             server_params = StdioServerParameters(
@@ -278,17 +286,20 @@ class CoralClient:
                 self._connected = False
                 logger.info("Disconnected from Coral MCP")
 
-    async def query(self, sql: str) -> QueryResult:
+    async def query(self, sql: str, params: Optional[dict[str, Any]] = None) -> QueryResult:
         if not self.is_connected:
             raise CoralError(
                 "Not connected to Coral MCP. Call connect() first.",
                 QueryErrorCode.NOT_CONNECTED,
             )
         safe_sql = ReadOnlyValidator.validate(sql)
+        args: dict[str, Any] = {"sql": safe_sql}
+        if params:
+            args["params"] = params
         async with self._lock:
             try:
                 result = await asyncio.wait_for(
-                    self._session.call_tool("sql", {"sql": safe_sql}),
+                    self._session.call_tool("sql", args),
                     timeout=self._timeout,
                 )
             except asyncio.TimeoutError:

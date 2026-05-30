@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from asyncio import Queue
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,9 +23,35 @@ DEFAULT_MAX_QUEUE_SIZE = 10
 QUEUE_STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "queue_state.jsonl"
 
 
+class QueueEncrypter:
+    def __init__(self):
+        self._fernet = None
+        key = os.environ.get("QUEUE_ENCRYPTION_KEY", "").strip()
+        if key:
+            try:
+                from cryptography.fernet import Fernet
+                self._fernet = Fernet(key.encode() if isinstance(key, str) else key)
+            except Exception as e:
+                logger.warning("QUEUE_ENCRYPTION_KEY set but invalid: %s - falling back to plaintext", e)
+
+    def encrypt(self, data: bytes) -> bytes:
+        if self._fernet:
+            return self._fernet.encrypt(data)
+        return data
+
+    def decrypt(self, data: bytes) -> bytes:
+        if self._fernet:
+            try:
+                return self._fernet.decrypt(data)
+            except Exception as e:
+                logger.warning("Queue state decryption failed: %s", e)
+        return data
+
+
 class QueuePersistence:
-    def __init__(self, path: Path = QUEUE_STATE_PATH):
+    def __init__(self, path: Path = QUEUE_STATE_PATH, encrypter: Optional[QueueEncrypter] = None):
         self._path = path
+        self._encrypter = encrypter or QueueEncrypter()
 
     def save(self, item: tuple) -> None:
         question, channel, thread_ts, since, service = item
@@ -39,8 +66,10 @@ class QueuePersistence:
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with open(self._path, "a") as f:
-                f.write(json.dumps(entry) + "\n")
+            raw = json.dumps(entry) + "\n"
+            encrypted = self._encrypter.encrypt(raw.encode())
+            with open(self._path, "ab") as f:
+                f.write(encrypted + b"\n")
         except Exception as e:
             logger.warning("Failed to save queue state: %s", e)
 
@@ -49,32 +78,38 @@ class QueuePersistence:
         try:
             if not self._path.exists():
                 return
-            lines = self._path.read_text().splitlines()
+            raw = self._path.read_bytes()
+            lines = raw.split(b"\n")
             kept = []
             for line in lines:
+                if not line.strip():
+                    continue
+                decrypted = self._encrypter.decrypt(line)
                 try:
-                    entry = json.loads(line)
+                    entry = json.loads(decrypted)
                     if (entry.get("question") == question
                             and entry.get("channel") == channel
                             and entry.get("thread_ts") == thread_ts):
                         continue
                     kept.append(line)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, Exception):
                     continue
-            self._path.write_text("\n".join(kept) + "\n" if kept else "")
+            self._path.write_bytes(b"\n".join(kept) + b"\n" if kept else b"")
         except Exception as e:
             logger.warning("Failed to remove queue state: %s", e)
 
     @classmethod
-    def load(cls, path: Path = QUEUE_STATE_PATH) -> list[dict[str, Any]]:
+    def load(cls, path: Path = QUEUE_STATE_PATH, encrypter: Optional[QueueEncrypter] = None) -> list[dict[str, Any]]:
         if not path.exists():
             return []
+        _enc = encrypter or QueueEncrypter()
         entries = []
         try:
-            for line in path.read_text().splitlines():
+            for line in path.read_bytes().split(b"\n"):
                 if line.strip():
+                    decrypted = _enc.decrypt(line)
                     try:
-                        entries.append(json.loads(line))
+                        entries.append(json.loads(decrypted))
                     except json.JSONDecodeError:
                         continue
         except Exception as e:

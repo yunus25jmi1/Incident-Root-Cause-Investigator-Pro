@@ -197,6 +197,14 @@ async def global_error_handler(error, body, logger):
 
 
 async def main():
+    _dsn = os.environ.get("SENTRY_DSN", "").strip()
+    if _dsn:
+        try:
+            import sentry_sdk
+            sentry_sdk.init(dsn=_dsn, traces_sample_rate=0.1)
+            logger.info("Sentry SDK initialized")
+        except Exception as e:
+            logger.warning("Failed to init Sentry SDK: %s", e)
     global investigation_queue
     investigation_queue = InvestigationQueue(
         app.client,

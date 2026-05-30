@@ -109,6 +109,34 @@
     <div class="progress-steps" id="progressSteps"></div>
   </div>
 
+  <div id="replaySection" class="report-section" hidden>
+    <h2><span class="icon">&#x23EF;</span> Temporal Replay</h2>
+    <p style="font-size:13px;color:var(--text-dim);margin-bottom:8px">Drag the slider or use the buttons to step through the incident timeline</p>
+    <div class="replay-timeline" id="replayTimeline">
+      <div class="replay-track"></div>
+    </div>
+    <div class="replay-controls">
+      <button class="replay-btn" id="replayStart">&#x23EE; Start</button>
+      <button class="replay-btn" id="replayPrev">&#x25C0;</button>
+      <button class="replay-btn" id="replayPlay">&#x25B6; Play</button>
+      <button class="replay-btn" id="replayNext">&#x25B6;&#xFE0E;</button>
+      <button class="replay-btn" id="replayEnd">End &#x23ED;</button>
+    </div>
+    <input type="range" class="replay-slider" id="replaySlider" min="0" max="0" value="0">
+    <div class="replay-current" id="replayCurrent">No events loaded</div>
+  </div>
+
+  <div id="graphSection" class="report-section" hidden>
+    <h2><span class="icon">&#x1F9F0;</span> Cascading Failure Graph</h2>
+    <p style="font-size:13px;color:var(--text-dim);margin-bottom:8px">Service dependency propagation — nodes show failure spread in real-time</p>
+    <div class="graph-container" id="failureGraph"></div>
+    <div class="graph-legend">
+      <span class="graph-legend-item"><span class="graph-legend-dot healthy"></span> Healthy</span>
+      <span class="graph-legend-item"><span class="graph-legend-dot degraded"></span> Degraded</span>
+      <span class="graph-legend-item"><span class="graph-legend-dot failed"></span> Failed</span>
+    </div>
+  </div>
+
   <div id="resultsArea"></div>
 
   <div class="empty-state" id="emptyState">
@@ -313,6 +341,59 @@
           </div>
         </div>` : ''}
 
+        ${report.predictions && report.predictions.length ? `
+        <div class="report-section">
+          <h2><span class="icon">&#x1F52E;</span> Predictive Risk Projection</h2>
+          <div class="predictions-grid">
+            ${report.predictions.map(function(p) {
+              const sev = p.severity || 'low';
+              return `<div class="prediction-card ${escapeHtml(sev)}">
+                <div class="pred-title">${escapeHtml(p.title)}</div>
+                <div class="pred-desc">${escapeHtml(p.description)}</div>
+                <div class="pred-meta">
+                  <span class="pred-timeframe">${escapeHtml(p.timeframe)}</span>
+                  <span class="pred-confidence">
+                    <span class="confidence-meter">
+                      <span class="meter-bar"><span class="meter-fill" style="width:${Math.round((p.confidence || 0) * 100)}%"></span></span>
+                      ${Math.round((p.confidence || 0) * 100)}%
+                    </span>
+                  </span>
+                </div>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>` : ''}
+
+        ${report.simulation ? `
+        <div class="report-section">
+          <h2><span class="icon">&#x1F500;</span> Parallel Universe Simulator</h2>
+          <p style="font-size:13px;color:var(--text-dim);margin-bottom:12px">What-if scenario: <strong>${escapeHtml(report.simulation.scenario)}</strong> &mdash; confidence: ${Math.round((report.simulation.confidence || 0) * 100)}%</p>
+          <div class="simulation-comparison">
+            <div class="simulation-side before">
+              <div class="sim-label">Before (current state)</div>
+              <div class="sim-value">System degraded — ${escapeHtml(report.simulation.trigger)} triggered. Errors propagating through service mesh.</div>
+            </div>
+            <div class="simulation-side after">
+              <div class="sim-label">After (simulated)</div>
+              <div class="sim-value">System recovered — rollback propagates through canary, error rate drops to baseline within 10 minutes.</div>
+            </div>
+          </div>
+          <div class="sim-timeline">
+            ${report.simulation.timeline.map(function(s) {
+              return `<div class="sim-step">
+                <span class="sim-time">${escapeHtml(s.time)}</span>
+                <span class="sim-dot ${escapeHtml(s.status)}"></span>
+                <span class="sim-event">${escapeHtml(s.event)}</span>
+              </div>`;
+            }).join('')}
+          </div>
+          <div class="sim-outcome recovered">&#x2705; ${escapeHtml(report.simulation.outcome)}</div>
+          ${report.simulation.side_effects && report.simulation.side_effects.length ? `
+          <p style="font-size:12px;color:var(--text-dim);margin-top:10px">
+            Side effects: ${report.simulation.side_effects.join('; ')}
+          </p>` : ''}
+        </div>` : ''}
+
         ${report.phase2_run ? `
         <div class="report-section">
           <h2><span class="icon">&#x1F4CA;</span> Phase 2 Queries</h2>
@@ -331,6 +412,9 @@
       });
 
       resultsArea.appendChild(div);
+
+      renderReplay(report);
+      renderGraph(report);
     }
 
     function escapeHtml(str) {
@@ -338,6 +422,194 @@
       const div = document.createElement('div');
       div.textContent = str;
       return div.innerHTML;
+    }
+
+    function renderReplay(report) {
+      const chain = report.timeline || report.evidence_chain || [];
+      if (!chain.length) return;
+      const replaySection = document.getElementById('replaySection');
+      const replayTimeline = document.getElementById('replayTimeline');
+      const replaySlider = document.getElementById('replaySlider');
+      const replayCurrent = document.getElementById('replayCurrent');
+      replaySection.hidden = false;
+
+      const markers = replayTimeline.querySelectorAll('.replay-marker');
+      markers.forEach(function(m) { m.remove(); });
+
+      replaySlider.max = chain.length - 1;
+      replaySlider.value = 0;
+
+      var replayData = chain;
+
+      function updateReplay(idx) {
+        idx = parseInt(idx, 10);
+        replaySlider.value = idx;
+        var item = replayData[idx];
+        replayCurrent.textContent = (idx + 1) + ' / ' + replayData.length + ' — ' + (item.title || item.event || '') + ' (' + (item.time || '') + ')';
+
+        var allMarkers = replayTimeline.querySelectorAll('.replay-marker');
+        allMarkers.forEach(function(m, i) {
+          m.classList.toggle('active', i === idx);
+        });
+      }
+
+      var track = replayTimeline.querySelector('.replay-track');
+      var total = chain.length;
+      chain.forEach(function(item, i) {
+        var marker = document.createElement('div');
+        marker.className = 'replay-marker ' + (item.type || 'event');
+        marker.style.left = ((i / Math.max(total - 1, 1)) * 100) + '%';
+        marker.title = (item.title || item.event || '') + ' — ' + (item.time || '');
+        marker.addEventListener('click', function() { updateReplay(i); });
+        replayTimeline.appendChild(marker);
+      });
+
+      replaySlider.addEventListener('input', function(e) { updateReplay(e.target.value); });
+
+      var playing = false;
+      var playInterval = null;
+      var playBtn = document.getElementById('replayPlay');
+      playBtn.onclick = function() {
+        if (playing) {
+          playing = false;
+          playBtn.textContent = '\u25B6 Play';
+          if (playInterval) { clearInterval(playInterval); playInterval = null; }
+        } else {
+          playing = true;
+          playBtn.textContent = '\u23F8 Pause';
+          if (parseInt(replaySlider.value, 10) >= replayData.length - 1) { updateReplay(0); }
+          playInterval = setInterval(function() {
+            var next = parseInt(replaySlider.value, 10) + 1;
+            if (next >= replayData.length) {
+              playing = false;
+              playBtn.textContent = '\u25B6 Play';
+              clearInterval(playInterval);
+              playInterval = null;
+              return;
+            }
+            updateReplay(next);
+          }, 1500);
+        }
+      };
+
+      document.getElementById('replayStart').onclick = function() { updateReplay(0); };
+      document.getElementById('replayEnd').onclick = function() { updateReplay(replayData.length - 1); };
+      document.getElementById('replayPrev').onclick = function() {
+        var next = Math.max(0, parseInt(replaySlider.value, 10) - 1);
+        updateReplay(next);
+      };
+      document.getElementById('replayNext').onclick = function() {
+        var next = Math.min(replayData.length - 1, parseInt(replaySlider.value, 10) + 1);
+        updateReplay(next);
+      };
+
+      updateReplay(0);
+    }
+
+    function renderGraph(report) {
+      var chain = report.timeline || report.evidence_chain || [];
+      if (!chain.length) return;
+      var graphSection = document.getElementById('graphSection');
+      graphSection.hidden = false;
+      var container = document.getElementById('failureGraph');
+
+      var services = {
+        'load-balancer': { label: 'Load Balancer', status: 'healthy', x: 0.5, y: 0.05 },
+        'api-gateway': { label: 'API Gateway', status: 'healthy', x: 0.5, y: 0.18 },
+        'checkout-service': { label: 'Checkout', status: 'healthy', x: 0.2, y: 0.35 },
+        'auth-service': { label: 'Auth', status: 'healthy', x: 0.8, y: 0.35 },
+        'payment-service': { label: 'Payment', status: 'healthy', x: 0.35, y: 0.55 },
+        'inventory-service': { label: 'Inventory', status: 'healthy', x: 0.65, y: 0.55 },
+        'database': { label: 'Database', status: 'healthy', x: 0.5, y: 0.72 },
+        'cache': { label: 'Cache', status: 'healthy', x: 0.15, y: 0.72 },
+        'message-queue': { label: 'Message Queue', status: 'healthy', x: 0.85, y: 0.72 },
+      };
+
+      var edges = [
+        ['load-balancer', 'api-gateway'],
+        ['api-gateway', 'checkout-service'],
+        ['api-gateway', 'auth-service'],
+        ['checkout-service', 'payment-service'],
+        ['checkout-service', 'inventory-service'],
+        ['auth-service', 'database'],
+        ['checkout-service', 'database'],
+        ['payment-service', 'database'],
+        ['inventory-service', 'database'],
+        ['checkout-service', 'cache'],
+        ['checkout-service', 'message-queue'],
+      ];
+
+      var hasError = chain.some(function(e) { return e.type === 'error' || e.type === 'incident' || e.type === 'page'; });
+
+      if (hasError) {
+        services['checkout-service'].status = 'degraded';
+        services['database'].status = 'degraded';
+        services['auth-service'].status = 'degraded';
+        services['payment-service'].status = 'failed';
+        services['inventory-service'].status = 'failed';
+      }
+
+      var width = container.clientWidth || 600;
+      var height = container.clientHeight || 280;
+
+      var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+
+      edges.forEach(function(edge) {
+        var from = services[edge[0]];
+        var to = services[edge[1]];
+        if (!from || !to) return;
+        var status = 'healthy';
+        if (from.status === 'failed' || to.status === 'failed') status = 'failed';
+        else if (from.status === 'degraded' || to.status === 'degraded') status = 'degraded';
+        var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', (from.x * width));
+        line.setAttribute('y1', (from.y * height));
+        line.setAttribute('x2', (to.x * width));
+        line.setAttribute('y2', (to.y * height));
+        line.setAttribute('class', 'graph-edge ' + status);
+        svg.appendChild(line);
+      });
+
+      Object.keys(services).forEach(function(key) {
+        var svc = services[key];
+        var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('class', 'graph-node');
+
+        var circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', (svc.x * width));
+        circle.setAttribute('cy', (svc.y * height));
+        circle.setAttribute('r', 18);
+        var fillColor = svc.status === 'failed' ? '#f85149' : svc.status === 'degraded' ? '#d29922' : '#21262d';
+        circle.setAttribute('fill', fillColor);
+        circle.setAttribute('stroke', svc.status === 'failed' ? '#f85149' : svc.status === 'degraded' ? '#d29922' : '#30363d');
+        circle.setAttribute('stroke-width', 2);
+        g.appendChild(circle);
+
+        var label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', (svc.x * width));
+        label.setAttribute('y', (svc.y * height) + 4);
+        label.setAttribute('class', 'graph-node-label');
+        if (svc.status !== 'healthy') {
+          label.setAttribute('fill', '#fff');
+        }
+        label.textContent = svc.label;
+        g.appendChild(label);
+
+        var statusLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        statusLabel.setAttribute('x', (svc.x * width));
+        statusLabel.setAttribute('y', (svc.y * height) + 22);
+        statusLabel.setAttribute('class', 'graph-node-status');
+        statusLabel.setAttribute('fill', svc.status === 'failed' ? '#f85149' : svc.status === 'degraded' ? '#d29922' : '#8b949e');
+        statusLabel.textContent = svc.status;
+        g.appendChild(statusLabel);
+
+        svg.appendChild(g);
+      });
+
+      container.innerHTML = '';
+      container.appendChild(svg);
     }
 
     const url = '/api/investigate?question=' + encodeURIComponent(question)

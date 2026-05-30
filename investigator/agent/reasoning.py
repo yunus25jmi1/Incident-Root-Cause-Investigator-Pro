@@ -121,9 +121,9 @@ class ReasoningEngine:
                 if len(rows) > 100:
                     parts.append(
                         f"[{source_name}] {data['row_count']} rows "
-                        f"(showing first 100 of {len(rows)}):"
+                        f"(showing top 5 of {len(rows)}):"
                     )
-                    parts.append(json.dumps(rows[:100], indent=2))
+                    parts.append(json.dumps(rows[:5], indent=2))
                 else:
                     parts.append(f"[{source_name}] {data['row_count']} rows:")
                     parts.append(json.dumps(rows, indent=2))

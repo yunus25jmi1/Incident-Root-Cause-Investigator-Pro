@@ -15,6 +15,10 @@ build/
 investigator/data/reports/
 investigator/data/queue_state.jsonl
 
+# Graphify output
+graphify-out/
+investigator/graphify-out/
+
 # Agent & Spec Kit
 .opencode/
 .specify/

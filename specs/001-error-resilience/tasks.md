@@ -24,9 +24,9 @@
 
 **Purpose**: Add shared error resilience types, helpers, and test infrastructure
 
-- [ ] T001 Add `SourceStatus` enum and retry decorator to `investigator/agent/coral_client.py`
-- [ ] T002 [P] Create `investigator/data/` directory with `.gitkeep` for queue state persistence
-- [ ] T003 Add retry-with-backoff utility function in `investigator/agent/coral_client.py`
+- [x] T001 Add `SourceStatus` enum and retry decorator to `investigator/agent/coral_client.py`
+- [x] T002 [P] Create `investigator/data/` directory with `.gitkeep` for queue state persistence
+- [x] T003 Add retry-with-backoff utility function in `investigator/agent/coral_client.py`
 
 ---
 
@@ -36,11 +36,11 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 Add `SourceHealth` tracking dataclass and per-source health dict management in `investigator/agent/core.py`
-- [ ] T005 [P] Add `_retry_coral_query()` method with exponential backoff to `investigator/agent/coral_client.py`
-- [ ] T006 Add error classification helper (`is_transient_error`) to `investigator/agent/coral_client.py`
-- [ ] T007 [P] Add `QueuePersistence` class for JSONL-based queue state in `investigator/bot/queue.py`
-- [ ] T008 Add `_fallback_select()` for generating simple `SELECT * FROM table LIMIT 5` queries in `investigator/agent/core.py`
+- [x] T004 Add `SourceHealth` tracking dataclass and per-source health dict management in `investigator/agent/core.py`
+- [x] T005 [P] Add `_retry_coral_query()` method with exponential backoff to `investigator/agent/coral_client.py`
+- [x] T006 Add error classification helper (`is_transient_error`) to `investigator/agent/coral_client.py`
+- [x] T007 [P] Add `QueuePersistence` class for JSONL-based queue state in `investigator/bot/queue.py`
+- [x] T008 Add `_fallback_select()` for generating simple `SELECT * FROM table LIMIT 5` queries in `investigator/agent/core.py`
 
 **Checkpoint**: Foundation ready — user story implementation can now begin
 
@@ -54,16 +54,16 @@
 
 ### Tests for User Story 1
 
-- [ ] T009 [P] [US1] Test per-source error isolation in `investigator/tests/test_core.py` (corrupt sentry, verify other 4 sources return data)
-- [ ] T010 [US1] Test source health tracking in report output in `investigator/tests/test_integration.py`
+- [x] T009 [P] [US1] Test per-source error isolation in `investigator/tests/test_core.py` (corrupt sentry, verify other 4 sources return data)
+- [x] T010 [US1] Test source health tracking in report output in `investigator/tests/test_integration.py`
 
 ### Implementation for User Story 1
 
-- [ ] T011 [P] [US1] Wrap each Phase 1 source query in try/except with `SourceHealth` tracking in `investigator/agent/core.py:_run_phase1()`
-- [ ] T012 [P] [US1] Add `retry_count` and `fallback_used` fields to `SourceHealth` in `investigator/agent/core.py`
-- [ ] T013 [US1] Update `_build_report()` to include per-source `status`, `retries`, and `fallback` in report output in `investigator/agent/core.py`
-- [ ] T014 [US1] Add `_build_source_health_section()` for "Source Health" report block in `investigator/agent/core.py`
-- [ ] T015 [US1] Expand `sources` status from `ok`/`empty` to `ok`/`degraded`/`failed` in `investigator/agent/core.py:_build_report()`
+- [x] T011 [P] [US1] Wrap each Phase 1 source query in try/except with `SourceHealth` tracking in `investigator/agent/core.py:_run_phase1()`
+- [x] T012 [P] [US1] Add `retry_count` and `fallback_used` fields to `SourceHealth` in `investigator/agent/core.py`
+- [x] T013 [US1] Update `_build_report()` to include per-source `status`, `retries`, and `fallback` in report output in `investigator/agent/core.py`
+- [x] T014 [US1] Add `_build_source_health_section()` for "Source Health" report block in `investigator/agent/core.py`
+- [x] T015 [US1] Expand `sources` status from `ok`/`empty` to `ok`/`degraded`/`failed` in `investigator/agent/core.py:_build_report()`
 
 **Checkpoint**: At this point, User Story 1 should be fully functional and testable independently
 
@@ -77,18 +77,18 @@
 
 ### Tests for User Story 2
 
-- [ ] T016 [P] [US2] Test Phase 2 retry budget exhaustion in `investigator/tests/test_reasoning.py`
-- [ ] T017 [US2] Test fallback query generation for INVALID_SQL errors in `investigator/tests/test_core.py`
-- [ ] T018 [US2] Test consecutive failure threshold exits loop to synthesis in `investigator/tests/test_reasoning.py`
+- [x] T016 [P] [US2] Test Phase 2 retry budget exhaustion in `investigator/tests/test_reasoning.py`
+- [x] T017 [US2] Test fallback query generation for INVALID_SQL errors in `investigator/tests/test_core.py`
+- [x] T018 [US2] Test consecutive failure threshold exits loop to synthesis in `investigator/tests/test_reasoning.py`
 
 ### Implementation for User Story 2
 
-- [ ] T019 [P] [US2] Add `retry_budget` parameter to `analyze_with_loop()` in `investigator/agent/reasoning.py`
-- [ ] T020 [P] [US2] Add `max_consecutive_failures` parameter (default 3) in `investigator/agent/reasoning.py`
-- [ ] T021 [US2] Implement retry loop for failed Phase 2 SQL queries in `investigator/agent/reasoning.py:analyze_with_loop()`
-- [ ] T022 [US2] Call `_fallback_select()` when retry budget exhausted but fallback is possible in `investigator/agent/core.py`
-- [ ] T023 [US2] Track `phase2_health` counters in report output in `investigator/agent/core.py:_merge_llm_into_report()`
-- [ ] T024 [US2] Log ReadOnlyValidator violations with truncated SQL in `investigator/agent/coral_client.py:ReadOnlyValidator`
+- [x] T019 [P] [US2] Add `retry_budget` parameter to `analyze_with_loop()` in `investigator/agent/reasoning.py`
+- [x] T020 [P] [US2] Add `max_consecutive_failures` parameter (default 3) in `investigator/agent/reasoning.py`
+- [x] T021 [US2] Implement retry loop for failed Phase 2 SQL queries in `investigator/agent/reasoning.py:analyze_with_loop()`
+- [x] T022 [US2] Call `_fallback_select()` when retry budget exhausted but fallback is possible in `investigator/agent/core.py`
+- [x] T023 [US2] Track `phase2_health` counters in report output in `investigator/agent/core.py:_merge_llm_into_report()`
+- [x] T024 [US2] Log ReadOnlyValidator violations with truncated SQL in `investigator/agent/coral_client.py:ReadOnlyValidator`
 
 **Checkpoint**: At this point, User Stories 1 AND 2 should both work independently
 
@@ -102,17 +102,17 @@
 
 ### Tests for User Story 3
 
-- [ ] T025 [P] [US3] Test queue state save/load round-trip in `investigator/tests/test_queue.py`
-- [ ] T026 [US3] Test corrupt queue state on startup logs warning and starts fresh in `investigator/tests/test_queue.py`
-- [ ] T027 [US3] Test `/postmortem` works after restart with saved reports in `investigator/tests/test_e2e.py`
+- [x] T025 [P] [US3] Test queue state save/load round-trip in `investigator/tests/test_queue.py`
+- [x] T026 [US3] Test corrupt queue state on startup logs warning and starts fresh in `investigator/tests/test_queue.py`
+- [x] T027 [US3] Test `/postmortem` works after restart with saved reports in `investigator/tests/test_e2e.py`
 
 ### Implementation for User Story 3
 
-- [ ] T028 [P] [US3] Implement `_save_state()` method on `InvestigationQueue` in `investigator/bot/queue.py`
-- [ ] T029 [P] [US3] Implement `_load_state()` classmethod on `InvestigationQueue` in `investigator/bot/queue.py`
-- [ ] T030 [US3] Call `_save_state()` on each enqueue/dequeue in `investigator/bot/queue.py`
-- [ ] T031 [US3] Add queue state restoration in `handler.py:main()` on bot startup in `investigator/bot/handler.py`
-- [ ] T032 [US3] Add `replay_queue` logic after restore in `investigator/bot/handler.py`
+- [x] T028 [P] [US3] Implement `_save_state()` method on `InvestigationQueue` in `investigator/bot/queue.py`
+- [x] T029 [P] [US3] Implement `_load_state()` classmethod on `InvestigationQueue` in `investigator/bot/queue.py`
+- [x] T030 [US3] Call `_save_state()` on each enqueue/dequeue in `investigator/bot/queue.py`
+- [x] T031 [US3] Add queue state restoration in `handler.py:main()` on bot startup in `investigator/bot/handler.py`
+- [x] T032 [US3] Add `replay_queue` logic after restore in `investigator/bot/handler.py`
 
 **Checkpoint**: All user stories should now be independently functional
 
@@ -122,10 +122,10 @@
 
 **Purpose**: Improvements that affect multiple user stories
 
-- [ ] T033 Update `investigator/agent/reasoning.py` SYSTEM_PROMPT to document retry behavior
-- [ ] T034 [P] Run full test suite: `make test` — verify 234+ baseline + new tests pass
-- [ ] T035 [P] Update `AGENTS.md` to reference new error resilience capabilities
-- [ ] T036 Run `seed_all.py --activate` to refresh mock data after testing
+- [x] T033 Update `investigator/agent/reasoning.py` SYSTEM_PROMPT to document retry behavior
+- [x] T034 [P] Run full test suite: `make test` — verify 234+ baseline + new tests pass
+- [x] T035 [P] Update `AGENTS.md` to reference new error resilience capabilities
+- [x] T036 Run `seed_all.py --activate` to refresh mock data after testing
 
 ---
 

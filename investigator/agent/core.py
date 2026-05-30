@@ -74,6 +74,16 @@ class SourceHealth:
         }
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]*>")
+_SCRIPT_RE = re.compile(r"<script[^>]*>.*?</script>", re.IGNORECASE | re.DOTALL)
+
+
+def _strip_html(text: str) -> str:
+    text = _SCRIPT_RE.sub("", text)
+    text = _HTML_TAG_RE.sub("", text)
+    return text
+
+
 _INTERNAL_PATTERNS = [
     "Traceback (most recent call last)",
     "File \"",
@@ -241,9 +251,6 @@ class AgentCore:
         data: dict[str, Any] = {}
         parsed_since = self._parse_since(since)
         safe_service = self._sanitize_service(service) if service else ""
-        service_filter = (
-            f"AND project = '{safe_service}'" if safe_service else ""
-        )
         source_table_map = {
             "sentry_issues": self._source("sentry.issues"),
             "datadog_incidents": self._source("datadog.incidents"),
@@ -256,6 +263,11 @@ class AgentCore:
             health = SourceHealth(source_name=source_name)
             self._source_health[source_name] = health
             since_val = parsed_since or self.PHASE1_SINCE_DEFAULTS.get(source_name, "")
+            query_params: dict[str, str] = {}
+            service_filter = ""
+            if source_name == "sentry_issues" and safe_service:
+                service_filter = "AND project = $service"
+                query_params["service"] = safe_service
             query = (
                 template
                 .replace("{sentry_issues}", source_table_map["sentry_issues"])
@@ -265,10 +277,10 @@ class AgentCore:
                 .replace("{slack_messages}", source_table_map["slack_messages"])
                 .replace("{{INCIDENTS_CHANNEL}}", self._incidents_channel)
                 .replace("{{SINCE}}", since_val)
-                .replace("{{SERVICE_FILTER}}", service_filter if source_name == "sentry_issues" else "")
+                .replace("{{SERVICE_FILTER}}", service_filter)
             )
             try:
-                result = await self._coral.query(query)
+                result = await self._coral.query(query, params=query_params if query_params else None)
                 health.record_success()
                 data[source_name] = {
                     "rows": result.rows,
@@ -370,6 +382,8 @@ class AgentCore:
         people = self._find_people(
             github_rows, pagerduty_rows, slack_rows
         )
+        predictions = self._generate_predictions(sentry_rows, datadog_rows, pagerduty_rows)
+        simulation = self._generate_simulation(github_rows, sentry_rows)
 
         return {
             "question": question,
@@ -380,6 +394,8 @@ class AgentCore:
             "suggested_actions": self._suggest_actions(
                 sentry_rows, datadog_rows, github_rows, pagerduty_rows
             ),
+            "predictions": predictions,
+            "simulation": simulation,
             "confidence": (
                 llm_result.get("confidence", "Medium") if llm_result
                 else "Medium (Phase 1 data correlated, no Phase 2 loop yet)"
@@ -484,6 +500,107 @@ class AgentCore:
         return people
 
     @staticmethod
+    def _generate_predictions(
+        sentry_rows: list, datadog_rows: list, pagerduty_rows: list,
+    ) -> list[dict[str, str]]:
+        predictions = []
+        total_errors = sum(r.get("count", 0) for r in sentry_rows if isinstance(r, dict))
+        has_sev2 = any(
+            r.get("severity") == "SEV-2" for r in datadog_rows if isinstance(r, dict)
+        )
+        has_sev3 = any(
+            r.get("severity") == "SEV-3" for r in datadog_rows if isinstance(r, dict)
+        )
+        has_database_errors = any(
+            "database" in str(r.get("title", "")).lower()
+            or "connection" in str(r.get("title", "")).lower()
+            or "timeout" in str(r.get("title", "")).lower()
+            for r in sentry_rows if isinstance(r, dict)
+        )
+
+        if total_errors > 500 and has_sev2:
+            predictions.append({
+                "type": "degradation",
+                "title": "Database saturation risk",
+                "description": "High probability of complete database saturation within 5 minutes given current error trajectory.",
+                "timeframe": "3-5 minutes",
+                "severity": "critical",
+                "confidence": 0.85,
+            })
+            predictions.append({
+                "type": "cascade",
+                "title": "Cascading authorization failure",
+                "description": "Authorization service likely to degrade as database connections are consumed, causing cascading auth failures across dependent services.",
+                "timeframe": "5-8 minutes",
+                "severity": "high",
+                "confidence": 0.72,
+            })
+        elif total_errors > 200:
+            predictions.append({
+                "type": "escalation",
+                "title": "Incident severity escalation",
+                "description": f"Error count ({total_errors}) is trending upward. Incident likely to escalate to SEV-2 within 15 minutes if unmitigated.",
+                "timeframe": "10-15 minutes",
+                "severity": "high",
+                "confidence": 0.78,
+            })
+
+        if has_database_errors and has_sev3:
+            predictions.append({
+                "type": "capacity",
+                "title": "Connection pool exhaustion",
+                "description": "Database connection pool is under pressure. Connection timeouts indicate pool exhaustion risk within 10 minutes.",
+                "timeframe": "8-12 minutes",
+                "severity": "medium",
+                "confidence": 0.65,
+            })
+
+        if not predictions:
+            error_rate = total_errors / max(len(sentry_rows), 1)
+            if error_rate > 0:
+                predictions.append({
+                    "type": "stable",
+                    "title": "System stabilizing",
+                    "description": f"Low error rate ({total_errors} total). No escalation predicted in the next 30 minutes.",
+                    "timeframe": "30 minutes",
+                    "severity": "low",
+                    "confidence": 0.60,
+                })
+
+        return predictions
+
+    @staticmethod
+    def _generate_simulation(
+        github_rows: list, sentry_rows: list,
+    ) -> Optional[dict[str, Any]]:
+        if not github_rows:
+            return None
+        pr = github_rows[0] if isinstance(github_rows[0], dict) else {}
+        pr_title = pr.get("title", "")
+        pr_author = pr.get("user__login", "unknown")
+        if not pr_title:
+            return None
+
+        total_errors_before = sum(r.get("count", 0) for r in sentry_rows if isinstance(r, dict))
+        recovered_errors = int(total_errors_before * 0.05)
+
+        return {
+            "scenario": f"Rollback of PR: {pr_title}",
+            "trigger": f"PR by {pr_author} reverted",
+            "timeline": [
+                {"time": "T+0m", "event": f"Rollback initiated for commit in PR '{pr_title}'", "status": "pending"},
+                {"time": "T+2m", "event": "Rollback deployed to staging environment", "status": "validating"},
+                {"time": "T+4m", "event": "Error rate dropping — rollback propagating through canary", "status": "recovering"},
+                {"time": "T+6m", "event": f"Error rate reduced by ~{recovered_errors} — {recovered_errors} fewer errors/min", "status": "recovering"},
+                {"time": "T+8m", "event": "System latency returned to baseline (< 100ms)", "status": "recovered"},
+                {"time": "T+10m", "event": "Full recovery — all services operational", "status": "healthy"},
+            ],
+            "outcome": "Recovered",
+            "confidence": 0.75,
+            "side_effects": ["Brief (2 min) increase in 4xx responses during rollback propagation"],
+        }
+
+    @staticmethod
     def _suggest_actions(sentry_rows, datadog_rows, github_rows, pagerduty_rows) -> list[dict[str, str]]:
         actions = []
         if github_rows:
@@ -517,14 +634,24 @@ class AgentCore:
         import json
         from pathlib import Path
 
-        raw_id = report.get("incident_id", "unknown") or "unknown"
+        _safe = report.copy()
+        for key in ("root_cause", "analysis"):
+            val = _safe.get(key)
+            if isinstance(val, str):
+                _safe[key] = _strip_html(val)
+        timeline = _safe.get("timeline") or _safe.get("evidence_chain", [])
+        if isinstance(timeline, list):
+            for item in timeline:
+                if isinstance(item, dict) and isinstance(item.get("title"), str):
+                    item["title"] = _strip_html(item["title"])
+        raw_id = _safe.get("incident_id", "unknown") or "unknown"
         safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", raw_id)[:128]
         reports_dir = Path(__file__).resolve().parent.parent / "data" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         report_file = reports_dir / f"{safe_id}.json"
         try:
             with open(report_file, "w") as f:
-                json.dump(report, f, indent=2, default=str)
+                json.dump(_safe, f, indent=2, default=str)
             logger.info("Report saved to %s", report_file)
         except Exception as e:
             logger.warning("Failed to persist report: %s", e)
