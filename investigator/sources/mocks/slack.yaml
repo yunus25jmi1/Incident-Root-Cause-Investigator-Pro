@@ -1,14 +1,14 @@
 name: mock_slack
 version: "1.0.0"
 dsl_version: 3
-backend: jsonl
+backend: file
 description: Mock Slack messages
 tables:
   - name: messages
     description: Mock Slack messages
+    format: jsonl
     source:
-      location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/slack
-      glob: "messages.jsonl"
+      location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/slack/messages.jsonl
     columns:
       - {name: user_id, type: Utf8, nullable: true}
       - {name: text, type: Utf8, nullable: true}

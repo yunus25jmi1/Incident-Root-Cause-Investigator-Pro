@@ -12,7 +12,7 @@ class RateLimiter:
         self._window = window_seconds
         self._buckets: dict[str, deque] = defaultdict(deque)
 
-    def is_rate_limited(self, key: str) -> bool:
+    async def is_rate_limited(self, key: str) -> bool:
         now = time.monotonic()
         bucket = self._buckets[key]
         cutoff = now - self._window
@@ -23,7 +23,7 @@ class RateLimiter:
         bucket.append(now)
         return False
 
-    def remaining(self, key: str) -> int:
+    async def remaining(self, key: str) -> int:
         now = time.monotonic()
         bucket = self._buckets[key]
         cutoff = now - self._window
@@ -31,7 +31,7 @@ class RateLimiter:
             bucket.popleft()
         return max(0, self._max_requests - len(bucket))
 
-    def reset(self, key: Optional[str] = None) -> None:
+    async def reset(self, key: Optional[str] = None) -> None:
         if key:
             self._buckets.pop(key, None)
         else:

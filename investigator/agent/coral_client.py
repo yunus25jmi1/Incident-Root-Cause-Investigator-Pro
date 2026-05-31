@@ -82,6 +82,59 @@ def is_transient_error(error: CoralError) -> bool:
     return error.code in TRANSIENT_CODES
 
 
+class CircuitBreaker:
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+    CLOSED = "closed"
+
+    def __init__(self, trip_threshold: int = 3, window_seconds: float = 30.0, half_open_after: float = 10.0):
+        self._trip_threshold = trip_threshold
+        self._window_seconds = window_seconds
+        self._half_open_after = half_open_after
+        self._state = self.CLOSED
+        self._failure_count = 0
+        self._first_failure_time: float = 0.0
+        self._last_state_change: float = 0.0
+        self._lock = asyncio.Lock()
+
+    async def call(self, fn: callable, *args, **kwargs) -> Any:
+        async with self._lock:
+            now = time.monotonic()
+            if self._state == self.OPEN:
+                if now - self._last_state_change >= self._half_open_after:
+                    self._state = self.HALF_OPEN
+                    logger.info("Circuit breaker half-open — allowing probe")
+                else:
+                    raise CoralError(
+                        "Coral circuit breaker is open — fast-failing",
+                        QueryErrorCode.TIMEOUT,
+                        {"state": self._state, "retry_after": self._half_open_after - (now - self._last_state_change)},
+                    )
+        try:
+            result = await fn(*args, **kwargs)
+        except CoralError as e:
+            if is_transient_error(e):
+                async with self._lock:
+                    now = time.monotonic()
+                    if self._failure_count == 0:
+                        self._first_failure_time = now
+                    elif now - self._first_failure_time > self._window_seconds:
+                        self._failure_count = 0
+                        self._first_failure_time = now
+                    self._failure_count += 1
+                    if self._failure_count >= self._trip_threshold:
+                        self._state = self.OPEN
+                        self._last_state_change = now
+                        logger.warning("Circuit breaker tripped — %d failures in %.0fs window", self._failure_count, self._window_seconds)
+            raise
+        async with self._lock:
+            if self._state == self.HALF_OPEN:
+                self._state = self.CLOSED
+                self._failure_count = 0
+                logger.info("Circuit breaker closed — probe succeeded")
+        return result
+
+
 @dataclass
 class CacheEntry:
     result: Any
@@ -210,6 +263,7 @@ class CoralClient:
         self._write = None
         self._lock = asyncio.Lock()
         self._catalog_cache = CatalogCache(ttl_seconds=60.0)
+        self._breaker = CircuitBreaker(trip_threshold=3, window_seconds=30.0, half_open_after=10.0)
 
     @property
     def is_connected(self) -> bool:
@@ -286,44 +340,45 @@ class CoralClient:
                 self._connected = False
                 logger.info("Disconnected from Coral MCP")
 
-    async def query(self, sql: str, params: Optional[dict[str, Any]] = None) -> QueryResult:
+    @retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=8.0, jitter=0.5)
+    async def _query_inner(self, sql: str) -> QueryResult:
+        args: dict[str, Any] = {"sql": sql}
+        try:
+            result = await asyncio.wait_for(
+                self._session.call_tool("sql", args),
+                timeout=self._timeout,
+            )
+        except asyncio.TimeoutError:
+            raise CoralError(
+                f"Query timed out after {self._timeout}s",
+                QueryErrorCode.TIMEOUT,
+                {"sql": sql, "timeout": self._timeout},
+            )
+        except Exception as e:
+            error_str = str(e).lower()
+            if "source" in error_str and "not found" in error_str:
+                code = QueryErrorCode.SOURCE_NOT_FOUND
+            elif "table" in error_str and "not found" in error_str:
+                code = QueryErrorCode.TABLE_NOT_FOUND
+            elif "not found" in error_str:
+                code = QueryErrorCode.TABLE_NOT_FOUND
+            else:
+                code = QueryErrorCode.UNKNOWN
+            raise CoralError(
+                f"Query execution failed: {e}",
+                code,
+                {"sql": sql, "error": str(e)},
+            ) from e
+        return self._parse_query_result(result, sql)
+
+    async def query(self, sql: str) -> QueryResult:
         if not self.is_connected:
             raise CoralError(
                 "Not connected to Coral MCP. Call connect() first.",
                 QueryErrorCode.NOT_CONNECTED,
             )
         safe_sql = ReadOnlyValidator.validate(sql)
-        args: dict[str, Any] = {"sql": safe_sql}
-        if params:
-            args["params"] = params
-        async with self._lock:
-            try:
-                result = await asyncio.wait_for(
-                    self._session.call_tool("sql", args),
-                    timeout=self._timeout,
-                )
-            except asyncio.TimeoutError:
-                raise CoralError(
-                    f"Query timed out after {self._timeout}s",
-                    QueryErrorCode.TIMEOUT,
-                    {"sql": safe_sql, "timeout": self._timeout},
-                )
-            except Exception as e:
-                error_str = str(e).lower()
-                if "source" in error_str and "not found" in error_str:
-                    code = QueryErrorCode.SOURCE_NOT_FOUND
-                elif "table" in error_str and "not found" in error_str:
-                    code = QueryErrorCode.TABLE_NOT_FOUND
-                elif "not found" in error_str:
-                    code = QueryErrorCode.TABLE_NOT_FOUND
-                else:
-                    code = QueryErrorCode.UNKNOWN
-                raise CoralError(
-                    f"Query execution failed: {e}",
-                    code,
-                    {"sql": safe_sql, "error": str(e)},
-                ) from e
-        return self._parse_query_result(result, safe_sql)
+        return await self._breaker.call(self._query_inner, safe_sql)
 
     async def list_catalog(self) -> list[CatalogEntry]:
         if not self.is_connected:

@@ -1,1 +1,4 @@
-{"id": "oncall-001", "escalation_policy_id": "EP001", "escalation_level": 1, "name": "Bob Smith", "email": "bob@company.com"}
+{"id": "oncall-cdn-1", "escalation_policy_id": "EP-CDN", "escalation_level": 1, "name": "Charlie", "email": "charlie@acme-corp.com"}
+{"id": "oncall-cdn-2", "escalation_policy_id": "EP-CDN", "escalation_level": 2, "name": "Diana Chen", "email": "diana@acme-corp.com"}
+{"id": "oncall-origin-1", "escalation_policy_id": "EP-ORIGIN", "escalation_level": 1, "name": "Alice", "email": "alice@acme-corp.com"}
+{"id": "oncall-origin-2", "escalation_policy_id": "EP-ORIGIN", "escalation_level": 2, "name": "Bob Smith", "email": "bob@acme-corp.com"}

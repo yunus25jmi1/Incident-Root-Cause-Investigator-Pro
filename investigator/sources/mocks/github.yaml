@@ -1,14 +1,14 @@
 name: mock_github
 version: "1.0.0"
 dsl_version: 3
-backend: jsonl
+backend: file
 description: Mock GitHub pull requests
 tables:
   - name: pulls
     description: Mock GitHub pull requests
+    format: jsonl
     source:
-      location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/github
-      glob: "pulls.jsonl"
+      location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/github/pulls.jsonl
     columns:
       - {name: number, type: Int64, nullable: false}
       - {name: title, type: Utf8, nullable: true}

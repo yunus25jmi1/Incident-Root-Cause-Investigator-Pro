@@ -1,14 +1,14 @@
 name: pagerduty
 version: "1.0.0"
 dsl_version: 3
-backend: jsonl
+backend: file
 description: Mock PagerDuty data for incident investigation demo
 tables:
   - name: incidents
     description: Mock PagerDuty incidents
+    format: jsonl
     source:
-      location: sources/mocks/pagerduty/
-      glob: "incidents.jsonl"
+      location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/pagerduty/incidents.jsonl
     columns:
       - name: id
         type: Utf8
@@ -33,9 +33,9 @@ tables:
         nullable: true
   - name: oncalls
     description: Mock PagerDuty oncalls
+    format: jsonl
     source:
-      location: sources/mocks/pagerduty/
-      glob: "oncalls.jsonl"
+      location: file:///home/yunus/Downloads/open-source/Incident Root-Cause Investigator Pro/investigator/sources/mocks/pagerduty/oncalls.jsonl
     columns:
       - name: id
         type: Utf8
