@@ -1,5 +1,6 @@
 # Incident Root-Cause Investigator Pro
 
+Enterprise AI agent for incident root-cause analysis using dual-phase Coral MCP parallel querying.
 A Slack-native AI agent that automates incident root‑cause investigation by joining data across **5 sources** through [Coral](https://withcoral.com) SQL.
 
 > **Hackathon:** Pirates of the Coral‑bean — Track 1 (Build an Enterprise Agent)
